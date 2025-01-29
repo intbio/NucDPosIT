@@ -1,3 +1,10 @@
+import numpy as np
+import pysam
+import os.path
+import warnings
+from abc import ABC, abstractmethod
+
+
 class AlignmentFileManager:
     def __init__(self, input_path, file_format, out_dir=None):
         self.__out_dir = self.__check_outdir(out_dir, input_path)
@@ -24,6 +31,18 @@ class AlignmentFileManager:
     @property
     def out_dir(self):
         return self.__out_dir
+    
+    @property
+    def templates(self):
+        tlens = []
+        for read in self.alignment_file:
+            if read.is_paired and not read.is_unmapped and not read.mate_is_unmapped and read.tlen > 0:
+                tlens.append(read.tlen) 
+        return np.array(tlens)
+    
+    @property
+    def chromosomes(self):
+        return self.alignment_file.references
     
     def __check_outdir(self, directory, input_path):
         if directory is None:
@@ -64,4 +83,67 @@ class AlignmentFileManager:
             pysam.index(self.alignment_path)
             return index_filename
         return index_path
+    
+    def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None):
+        availabel_iterovers = {'template'}
+        if iterover not in availabel_iterovers:
+            raise ValueError(f"can not iterate over {iterover}. Available arguments are {availabel_iterovers}")
+        if iterover == 'template':
+            return PysamTemaplteWindowGenerator(self.alignment_file, contig, win_len, start, stop)
         
+            
+# ---------------------------------------------------------------------------------------------------------------------            
+            
+class AbstractWindowIterator(ABC):
+    def __init__(self, data_generator):
+        self.__generator = data_generator
+        
+    @abstractmethod
+    def __iter__(self):
+        pass
+    
+    @abstractmethod
+    def __next__(self):
+        pass
+            
+            
+class BaseWindowIterator(AbstractWindowIterator):
+    def __init__(self, data_generator):
+        self.generator = data_generator
+        
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        batch = True
+        while batch:
+            new_batch = next(self.generator)
+            return new_batch
+        raise StopIteration
+        
+        
+class PysamTemaplteWindowGenerator(BaseWindowIterator):
+    def __init__(self, pysam, contig, winlen=300, start=0, stop=None):
+        super().__init__(self.template_generator())
+        self.pysam = pysam
+        self.contig = contig
+        self.winlen = winlen
+        self.start = start
+        self.stop = stop 
+    
+    def template_generator(self):
+        starts, stops = [], []
+        for i, read in enumerate(self.pysam.fetch(self.contig, self.start, self.stop)):
+            starts.append(read.reference_start), stops.append(read.reference_end)  
+            if len(starts) % self.winlen == 0:
+                batch = np.vstack([starts, stops]).T
+                yield batch
+                starts, stops = [], []
+        batch = np.vstack([starts, stops]).T
+        yield batch
+            
+        
+            
+        
+        
+            
