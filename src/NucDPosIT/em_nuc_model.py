@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
 import sklearn as sk
+from sklearn.cluster import KMeans
 from sklearn.base import BaseEstimator, ClusterMixin
 import numpy as np
 import scipy as spy
 from collections import Counter
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt 
 
 
 class CoordinateProbsMixin:
@@ -59,25 +61,24 @@ class BaseEMStrategy(CoordinateProbsMixin):
         self.max_iter = max_iter
         super().__init__(fit_res)
 
-    def E_step(self, gij, b, left_cords, right_cords):
+    def E_step(self, gij, left_cords, right_cords):
+        X = np.zeros((left_cords.shape[0], self.n_nucs))
         for j in range(self.n_nucs):
-            cur_prob = self.get_left_prob(
-                left_cords, self.positions[j]
-            ) * self.get_right_prob(right_cords, self.positions[j])
-            gij[:, j] = self.weights[j] * cur_prob
-            b[j, :] = cur_prob
-        gij[:] = gij / (self.weights @ b + 1e-10).reshape(-1, 1)
-
+            X[:, j] = self.get_left_prob(left_cords, self.positions[j]) * self.get_right_prob(right_cords, self.positions[j]) * self.weights[j]
+        p_x = self.weights @ X.T
+        p_x[p_x == 0] = 1e-50
+        gij[:] = X / (p_x.reshape(-1, 1))
+        gij[:] = gij / (gij.sum(axis=1).reshape(-1, 1) + 1e-50)
+        
+        
     def set_m_matrix(self, left_cords, right_cords):
         max_right_cord = right_cords.max()
         min_left_cord = left_cords.min()
         nofreads = left_cords.shape[0]
-        m = np.zeros((nofreads, 200 + max_right_cord))
-        for j in range(min_left_cord, 200 + max_right_cord):
-            m[:, j] = self.get_left_prob(left_cords, j) * self.get_right_prob(
-                right_cords, j
-            )
-        m = np.log(m + 1e-10)
+        m = np.zeros((nofreads, max_right_cord - min_left_cord + 1))
+        for j, dyad in enumerate(range(min_left_cord, max_right_cord + 1)):
+            m[:, j] = self.get_left_prob(left_cords, dyad) * self.get_right_prob(right_cords, dyad)
+        m = np.log(m + 1e-30)
         return m
 
 
@@ -87,15 +88,17 @@ class EMAlgorythm(BaseEMStrategy):
 
     def run_strategy(self, left_cords, right_cords):
         gij = np.zeros((left_cords.size, self.n_nucs))
-        b = np.zeros((self.n_nucs, left_cords.size))
         m = self.set_m_matrix(left_cords, right_cords)
+        offset = left_cords.min()
         for i in tqdm(range(self.max_iter), total=self.max_iter):
-            self.E_step(gij, b, left_cords, right_cords)
-            self.M_step(gij, m)
+            self.E_step(gij, left_cords, right_cords)
+            self.M_step(gij, m, offset)
 
-    def M_step(self, gij, m):
-        self.positions = np.argmax(gij.T @ m, axis=1)
+
+    def M_step(self, gij, m, offset=0):
+        self.positions = np.argmax(gij.T @ m, axis=1) + offset
         self.weights = gij.sum(axis=0) / gij.shape[0]
+        self.weights /= self.weights.sum()
 
 
 class StochasticEMAlgorythm(BaseEMStrategy):
@@ -104,13 +107,14 @@ class StochasticEMAlgorythm(BaseEMStrategy):
 
     def run_strategy(self, left_cords, right_cords):
         gij = np.zeros((left_cords.size, self.n_nucs))
-        b = np.zeros((self.n_nucs, left_cords.size))
         m = self.set_m_matrix(left_cords, right_cords)
         polynom_modeling = np.zeros_like(gij)
+        offset = left_cords.min()
         for i in tqdm(range(self.max_iter), total=self.max_iter):
-            self.E_step(gij, b, left_cords, right_cords)
+            self.E_step(gij, left_cords, right_cords)
             self.S_step(gij, polynom_modeling)
-            self.M_step(polynom_modeling, m)
+            self.M_step(polynom_modeling, m, offset)
+
 
     def S_step(self, gij, polynom_modeling):
         nofreads = polynom_modeling.shape[0]
@@ -118,8 +122,10 @@ class StochasticEMAlgorythm(BaseEMStrategy):
             polynom_modeling[i, :] = spy.stats.multinomial.rvs(1, gij[i, :])
         self.weights = polynom_modeling.sum(0) / nofreads
 
-    def M_step(self, polynom_modeling, m):
-        self.positions = np.argmax(polynom_modeling.T @ m, axis=1)
+    def M_step(self, polynom_modeling, m, offset):
+        self.positions = np.argmax(polynom_modeling.T @ m, axis=1) + offset
+        
+
 
 
 class EMNucModel(BaseEstimator, ClusterMixin):
@@ -136,7 +142,7 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         return weights
 
     def init_params(self, X):
-        kmeans = sk.cluster.KMeans(self.n_nucs)
+        kmeans = KMeans(self.n_nucs)
         kmeans.fit(X)
         self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
         cluster_counts = Counter(kmeans.predict(X))
@@ -193,8 +199,7 @@ class EMNucModel(BaseEstimator, ClusterMixin):
     def predict_matrix(self, X):
         left_cords, right_cords = X[:, 0], X[:, 1]
         gij = np.zeros((left_cords.size, self.n_nucs))
-        b = np.zeros((self.n_nucs, left_cords.size))
-        self.model.E_step(gij, b, left_cords, right_cords)
+        self.model.E_step(gij, left_cords, right_cords)
         return gij.T
 
     def score(self):
