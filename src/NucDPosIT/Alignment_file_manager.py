@@ -84,12 +84,12 @@ class AlignmentFileManager:
             return index_filename
         return index_path
     
-    def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None):
-        availabel_iterovers = {'template'}
-        if iterover not in availabel_iterovers:
-            raise ValueError(f"can not iterate over {iterover}. Available arguments are {availabel_iterovers}")
+    def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None, step=None):
         if iterover == 'template':
             return PysamTemaplteWindowGenerator(self.alignment_file, contig, win_len, start, stop)
+        if iterover == 'overlap':
+            return PysamOverlapingWindowGenerator(self.alignment_file, contig, win_len, start, stop, step)
+        raise ValueError(f"can not iterate over {iterover}. Available arguments are {availabel_iterovers}")
         
             
 # ---------------------------------------------------------------------------------------------------------------------            
@@ -98,6 +98,10 @@ class AbstractWindowIterator(ABC):
     def __init__(self, data_generator):
         self.__generator = data_generator
         
+    @property
+    def generator(self):
+        return self.__generator
+        
     @abstractmethod
     def __iter__(self):
         pass
@@ -105,11 +109,20 @@ class AbstractWindowIterator(ABC):
     @abstractmethod
     def __next__(self):
         pass
+    
+    @abstractmethod
+    def template_generator(self):
+        pass
             
             
 class BaseWindowIterator(AbstractWindowIterator):
-    def __init__(self, data_generator):
-        self.generator = data_generator
+    def __init__(self, data_generator, pysam, contig, winlen=300, start=0, stop=None):
+        super().__init__(data_generator)
+        self.pysam = pysam
+        self.contig = contig
+        self.winlen = winlen
+        self.start = start
+        self.stop = stop 
         
     def __iter__(self):
         return self
@@ -124,12 +137,7 @@ class BaseWindowIterator(AbstractWindowIterator):
         
 class PysamTemaplteWindowGenerator(BaseWindowIterator):
     def __init__(self, pysam, contig, winlen=300, start=0, stop=None):
-        super().__init__(self.template_generator())
-        self.pysam = pysam
-        self.contig = contig
-        self.winlen = winlen
-        self.start = start
-        self.stop = stop 
+        super().__init__(self.template_generator(), pysam, contig, winlen, start, stop)
     
     def template_generator(self):
         starts, stops = [], []
@@ -141,6 +149,25 @@ class PysamTemaplteWindowGenerator(BaseWindowIterator):
                 starts, stops = [], []
         batch = np.vstack([starts, stops]).T
         yield batch
+        
+
+class PysamOverlapingWindowGenerator(BaseWindowIterator):
+    def __init__(self, pysam, contig, winlen=300, start=0, stop=None, step=1):
+        super().__init__(self.template_generator(), pysam, contig, winlen, start, stop)
+        self.step = step
+        
+    def template_generator(self):
+        for start_cord in range(self.start, self.stop, self.step):
+            if start_cord + self.winlen > self.stop:
+                pysam_iter = self.pysam.fetch(self.contig, start_cord, self.stop)
+            else:
+                pysam_iter = self.pysam.fetch(self.contig, start_cord, start_cord + self.winlen)
+            batch = np.array(list(map(lambda x: [x.reference_start, x.reference_end], pysam_iter)))
+            yield batch
+        
+
+        
+        
             
         
             
