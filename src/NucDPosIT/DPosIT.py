@@ -79,7 +79,13 @@ class DPosIT(AbstractDPosIT):
             tlens = self.tlens.reshape(-1, 1)
             return self.exo_model.fit(tlens)
         
-    def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None):
-        return self.file_manager.iterover(contig, iterover, win_len, start, stop)
+    def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None, step=None):
+        return self.file_manager.iterover(contig, iterover, win_len, start, stop, step)
+    
+    
+# ------------------------------------------------------------------------------------------
+
+
+
   
          
