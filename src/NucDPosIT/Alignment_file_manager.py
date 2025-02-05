@@ -141,14 +141,19 @@ class PysamTemaplteWindowGenerator(BaseWindowIterator):
     
     def template_generator(self):
         starts, stops = [], []
-        for i, read in enumerate(self.pysam.fetch(self.contig, self.start, self.stop)):
-            starts.append(read.reference_start), stops.append(read.reference_end)  
-            if len(starts) % self.winlen == 0:
+        for record in self.pysam.fetch(self.contig, self.start, self.stop):
+            tlen = record.tlen
+            if tlen >= 0:
+                start, stop = record.reference_start, record.reference_start + tlen
+            else:
+                start, stop = record.reference_end + tlen, record.reference_end
+            starts.append(start)
+            stops.append(stop)
+            if len(starts) == self.winlen:    
                 batch = np.vstack([starts, stops]).T
-                yield batch
                 starts, stops = [], []
-        batch = np.vstack([starts, stops]).T
-        yield batch
+                yield batch
+        yield np.vstack([starts, stops]).T
         
 
 class PysamOverlapingWindowGenerator(BaseWindowIterator):
@@ -158,18 +163,26 @@ class PysamOverlapingWindowGenerator(BaseWindowIterator):
         
     def template_generator(self):
         for start_cord in range(self.start, self.stop, self.step):
+            starts, stops = [], []
             if start_cord + self.winlen > self.stop:
                 pysam_iter = self.pysam.fetch(self.contig, start_cord, self.stop)
             else:
                 pysam_iter = self.pysam.fetch(self.contig, start_cord, start_cord + self.winlen)
-            batch = np.array(list(map(lambda x: [x.reference_start, x.reference_end], pysam_iter)))
+            for record in pysam_iter:
+                tlen = record.tlen
+                if tlen >= 0:
+                    start, stop = record.reference_start, record.reference_start + tlen
+                else:
+                    start, stop = record.reference_end + tlen, record.reference_end
+                starts.append(start)
+                stops.append(stop)
+            batch = np.vstack([starts, stops]).T
             yield batch
         
 
         
         
-            
-        
+    
             
         
         
