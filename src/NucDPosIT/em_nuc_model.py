@@ -54,9 +54,12 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     
     
 class KDECoordinateProbsMixin(AbstractCoordinateProbsMixin):
-    def __init__(self, kde_model, fit_res):
-        super().__init__(fit_res)
-        self.kde_model = kde_model
+    def __init__(self, kde_model):
+        super().__init__(kde_model)
+        
+    @property
+    def kde_model(self):
+        return self.fit_res
         
     def get_tlen_prob(self, left_cord, right_cord, dyad_pos=0):
         concat_cords = np.vstack((left_cord, right_cord)).reshape(-1, 2) - dyad_pos
@@ -111,15 +114,15 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         for j in range(self.n_nucs):
             X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j]) * self.weights[j]
         p_x = self.weights @ X.T
-        self.gij[p_x != 0] = X[p_x != 0] / (p_x[p_x != 0].reshape(-1, 1))
-        self.gij[p_x != 0] = self.gij[p_x != 0] / (self.gij[p_x != 0].sum(axis=1).reshape(-1, 1))
+        p_x[p_x == 0] = 1e-50
+        self.gij = X / p_x.reshape(-1, 1)
+        self.gij = self.gij / (self.gij.sum(axis=1).reshape(-1, 1) + 1e-100)
         
     def M_step(self):
-        good_index = ~np.all(self.gij == 0, axis=1)
-        self.positions = np.argmax(self.gij[good_index].T @ self.m[good_index], axis=1) + self.offset
-        self.weights = self.gij.sum(axis=0) / good_index.astype(int).sum()
+        # good_index = ~np.all(self.gij == 0, axis=1)
+        self.positions = np.argmax(self.gij.T @ self.m, axis=1) + self.offset
+        self.weights = self.gij.sum(axis=0) / self.nofreads
         self.weights /= self.weights.sum()
-        print(self.positions)
         
     def set_m_matrix(self, left_cords, right_cords):
         max_right_cord = right_cords.max() 
@@ -127,8 +130,9 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         nofreads = left_cords.shape[0]
         m = np.zeros((nofreads, max_right_cord - min_left_cord + 1))
         for j, dyad in enumerate(range(min_left_cord, max_right_cord + 1)):
-            m[:, j] = self.get_left_prob(left_cords, dyad) * self.get_right_prob(right_cords, dyad)
-        m[m == 0] = np.log(m[m == 0] + 1e-50)
+            probs = self.get_tlen_prob(left_cords, right_cords, dyad)
+            m[:, j] = probs
+        m = np.log(m + 1e-50)
         return m
     
     def _init_fields(self, left_cords, right_cords):
@@ -181,13 +185,9 @@ class StochasticEMStrategy(BaseEMStrategy):
         
     def S_step(self):
         for i in range(self.nofreads):
-            gij_row = self.gij[i, :]
-            gij_row /= gij_row.sum()
-            # if np.all(gij_row == 0):
-            #     continue
-            # gij_row /= gij_row.sum()
-            # print(gij_row, gij_row.sum())
-            self.polynom_modeling[i, :] = spy.stats.multinomial.rvs(n=1, p=gij_row)
+            gij_row = np.absolute(self.gij[i, :])
+            multi_probs = np.random.multinomial(1, gij_row)
+            self.polynom_modeling[i, :] = multi_probs
         self.weights = self.polynom_modeling.sum(0) / self.nofreads
         self.weights /= self.weights.sum()
 
@@ -298,13 +298,12 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         try:
             self.model.run_strategy(self.X_[:, 0], self.X_[:, 1])
         except Exception as e:
-            print(e)
+            raise e
         else:
             self.positions_, self.weights_ = self.model.positions, self.model.weights
             self.labels_ = self.predict(X)
             self.is_fitted_ = True
-        finally:
-            return self
+        return self
 
     def fit_predict(self, X, weights0, positions0, y=None):
         self.fit(X, weights0, positions0, y)
