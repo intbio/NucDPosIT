@@ -30,7 +30,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     def __get_left_prob(self, left_cord, dyad_pos):
         i = dyad_pos - left_cord - 23
         if i < 0 or i >= len(self.fit_res):
-            return 1e-50
+            return 0
         return self.fit_res[i]
 
     def get_left_prob(self, left_cord, dyad_pos):
@@ -41,7 +41,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     def __get_right_prob(self, right_cord, dyad_pos):
         i = right_cord - dyad_pos - 23
         if i < 0 or i >= len(self.fit_res):
-            return 1e-50
+            return 0
         return self.fit_res[i]
 
     def get_right_prob(self, right_cord, dyad_pos):
@@ -51,20 +51,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     
     def get_tlen_prob(self, left_cord, right_cord, dyad_pos):
         return self.get_left_prob(left_cord, dyad_pos) * self.get_right_prob(right_cord, dyad_pos)
-    
-    
-class KDECoordinateProbsMixin(AbstractCoordinateProbsMixin):
-    def __init__(self, kde_model):
-        super().__init__(kde_model)
-        
-    @property
-    def kde_model(self):
-        return self.fit_res
-        
-    def get_tlen_prob(self, left_cord, right_cord, dyad_pos=0):
-        concat_cords = np.vstack((left_cord, right_cord)).reshape(-1, 2) - dyad_pos
-        return np.exp(self.kde_model.score_samples(concat_cords))
-        
+            
 # -----------------------------------------------------------------------------------
 
 
@@ -77,6 +64,7 @@ class AbstractEMStrategy(ABC):
         self.__gij = None
         self.__m = None
         self.__nofreads = None
+        self.__X = None
         
     @property
     def gij(self):
@@ -101,6 +89,14 @@ class AbstractEMStrategy(ABC):
     @nofreads.setter
     def nofreads(self, new_nofreads):
         self.__nofreads = new_nofreads
+        
+    @property
+    def X(self):
+        return self.__X
+    
+    @X.setter
+    def X(self, newX):
+        self.__X = newX
     
     
 class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
@@ -110,16 +106,14 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         self.offset = None
 
     def E_step(self, left_cords, right_cords):
-        X = np.zeros((left_cords.shape[0], self.n_nucs))
         for j in range(self.n_nucs):
-            X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j]) * self.weights[j]
-        p_x = self.weights @ X.T
-        p_x[p_x == 0] = 1e-50
-        self.gij = X / p_x.reshape(-1, 1)
-        self.gij = self.gij / (self.gij.sum(axis=1).reshape(-1, 1) + 1e-100)
+            self.X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j]) * self.weights[j]
+        p_x = self.weights @ self.X.T
+        p_x[p_x == 0] = 1e-200
+        self.gij = self.X / p_x.reshape(-1, 1)
+        self.gij = self.gij / (self.gij.sum(axis=1).reshape(-1, 1))
         
     def M_step(self):
-        # good_index = ~np.all(self.gij == 0, axis=1)
         self.positions = np.argmax(self.gij.T @ self.m, axis=1) + self.offset
         self.weights = self.gij.sum(axis=0) / self.nofreads
         self.weights /= self.weights.sum()
@@ -132,7 +126,8 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         for j, dyad in enumerate(range(min_left_cord, max_right_cord + 1)):
             probs = self.get_tlen_prob(left_cords, right_cords, dyad)
             m[:, j] = probs
-        m = np.log(m + 1e-50)
+        m[m == 0] = 1e-200
+        m = np.log(m)
         return m
     
     def _init_fields(self, left_cords, right_cords):
@@ -140,6 +135,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         self.m = self.set_m_matrix(left_cords, right_cords)
         self.offset = left_cords.min()
         self.nofreads = left_cords.shape[0]
+        self.X = np.zeros((left_cords.shape[0], self.n_nucs))
         
     def run_strategy(self, left_cords, right_cords):
         self._init_fields(left_cords, right_cords)
@@ -148,15 +144,20 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
             self.M_step()
         
     def detect_outliers_index(self):
-        return np.arange(self.nofreads)[np.all(self.gij == 0, axis=1)]
-    
-    def detect_lowess_out_index(self, left_cords, right_cords):
-        tlen_probs = self.get_tlen_prob()
+        pass
     
     def cluster_occupancy(self):
         class_occ = Counter(np.argmax(self.gij, axis=1))
         return np.array([class_occ[label] for label in range(self.n_nucs)])
     
+    def log_score(self, batch):
+        left_cords, right_cords = batch[:, 0], batch[:, 1]
+        X = np.zeros((left_cords.size, self.n_nucs))
+        for j in range(self.n_nucs):
+            X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j])
+        p_x = X @ self.weights.T
+        score = np.sum(np.log(p_x))
+        return score
     
 class AdditionCompStrategy(BaseEMStrategy):
     def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
@@ -176,6 +177,10 @@ class AdditionCompStrategy(BaseEMStrategy):
         new_gij_column[out_ind] = 1
         self.gij = np.hstack((self.gij, new_gij_column))
         print("add component")
+        
+    def detect_outliers_index(self):
+        
+        return outliers_ind
         
 
 class StochasticEMStrategy(BaseEMStrategy):
@@ -248,6 +253,15 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         self.cluster_strategy = cluster_strategy
         self.max_iter = max_iter
         self.fit_res = fit_res
+    
+#     @property
+#     def n_nucs(self):
+#         return self.__n_nucs
+        
+#     @n_nucs.setter
+#     def n_nucs(self, new_n_nucs):
+        
+                                                                                                        
 
     def __validate_weights(self, weights):
         if weights.size != self.n_nucs:
@@ -319,8 +333,7 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         return self.model.gij.T
 
     def score(self, X):
-        prob_matrix = self.predict_matrix(X)
-        return np.sum(np.log(self.weights_ @ prob_matrix + 1e-50))
+        return self.model.log_score(X)
     
     def cluster_occupancy(self):
         check_is_fitted(self)
