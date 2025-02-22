@@ -8,6 +8,7 @@ from collections import Counter
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt 
 from sklearn.utils.validation import check_is_fitted
+from functools import lru_cache
 
 
 class AbstractCoordinateProbsMixin(ABC):
@@ -27,6 +28,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     def __init__(self, fit_res):
         super().__init__(fit_res)
     
+    @lru_cache(1024)
     def __get_left_prob(self, left_cord, dyad_pos):
         i = dyad_pos - left_cord - 23
         if i < 0 or i >= len(self.fit_res):
@@ -37,7 +39,8 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
         return np.array(
             list(map(lambda x: self.__get_left_prob(x, dyad_pos), left_cord))
         )
-
+    
+    @lru_cache(1024)
     def __get_right_prob(self, right_cord, dyad_pos):
         i = right_cord - dyad_pos - 23
         if i < 0 or i >= len(self.fit_res):
@@ -207,7 +210,7 @@ class StochasticEMStrategy(BaseEMStrategy):
 class DropingStochasticEMStrategy(StochasticEMStrategy):
     def __init__(self, max_comp, alpha, positions0, weights0, fit_res, max_iter=500):
         super().__init__(max_comp, positions0, weights0, fit_res, max_iter)
-        self.alpha = 0.05
+        self.alpha = alpha
         self.min_incluster = None
         
     def _init_fields(self, left_cords, right_cords):
@@ -222,7 +225,6 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
             self.__drop_component(argmin_cluster_occ, left_cords, right_cords)
             
     def __drop_component(self, drop_i, left_cords, right_cords):
-        print('drop')
         self.n_nucs -= 1
         self.gij = np.delete(self.gij, drop_i, 1)
         drop_tlens_index = self.polynom_modeling[:, drop_i] == 1
@@ -233,7 +235,6 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
         self.positions = np.delete(self.positions, drop_i)
         self.weights = np.delete(self.weights, drop_i)
         super().E_step(left_cords, right_cords)
-        print(self.cluster_occupancy())
         
     def cluster_occupancy(self):
         return self.polynom_modeling.sum(0)
@@ -296,12 +297,13 @@ class AdditionStochasticEMAlgorythm(StochasticEMAlgorythm, AdditionCompStrategy)
 # ----------------------------------------------------------------------------------------
         
 class EMNucModel(BaseEstimator, ClusterMixin):
-    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000):
+    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000, alpha=0.05):
         self.n_nucs = n_nucs
         self.max_iter = max_iter
         self.cluster_strategy = cluster_strategy
         self.max_iter = max_iter
         self.fit_res = fit_res
+        self.alpha = alpha
     
 #     @property
 #     def n_nucs(self):
@@ -356,7 +358,7 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         elif self.cluster_strategy == 'ADDSEM':
             self.model = AdditionStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter)
         elif self.cluster_strategy == 'DROPSEM':
-            self.model = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.max_iter, self.fit_res)
+            self.model = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.max_iter, self.fit_res, alpha=self.alpha)
         else:
             raise AttributeError("cluster strategy can be SEM, EM, DROPSEM, ADDEM or ADDSEM")
 
