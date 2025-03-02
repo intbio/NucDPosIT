@@ -119,7 +119,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
     def M_step(self):
         self.positions = np.argmax(self.gij.T @ self.m, axis=1) + self.offset
         self.weights = self.gij.sum(axis=0) / self.nofreads
-        self.weights /= self.weights.sum()
+        # self.weights /= self.weights.sum()
         
     def set_m_matrix(self, left_cords, right_cords):
         max_right_cord = right_cords.max() 
@@ -159,8 +159,17 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         for j in range(self.n_nucs):
             X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j])
         p_x = X @ self.weights.T
-        score = np.sum(np.log(p_x))
+        p_x[p_x == 0] = 1e-100
+        score = np.sum(np.log(p_x)) / self.n_nucs
         return score
+    
+    def predict(self, X):
+        tlen_probs = np.zeros((self.n_nucs, X.shape[0]))
+        starts, stops = X[:, 0], X[:, 1]
+        for i, dyad_pos in enumerate(self.positions):
+            tlen_probs[i, :] = self.get_tlen_prob(starts, stops, dyad_pos)
+        return (self.weights @ tlen_probs).reshape(-1, 1)
+  
     
 class AdditionCompStrategy(BaseEMStrategy):
     def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
@@ -212,6 +221,7 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
         super().__init__(max_comp, positions0, weights0, fit_res, max_iter)
         self.alpha = alpha
         self.min_incluster = None
+        self.drop_counter = 100
         
     def _init_fields(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
@@ -221,10 +231,13 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
         super().E_step(left_cords, right_cords)
         cluster_occ = self.cluster_occupancy()
         argmin_cluster_occ = np.argmin(cluster_occ)
-        if not np.all(cluster_occ == 0) and cluster_occ[argmin_cluster_occ] < self.min_incluster:
+        self.drop_counter -= 1
+        if self.drop_counter < 0 and not np.all(cluster_occ == 0) and cluster_occ[argmin_cluster_occ] < self.min_incluster:
             self.__drop_component(argmin_cluster_occ, left_cords, right_cords)
             
+            
     def __drop_component(self, drop_i, left_cords, right_cords):
+        self.drop_counter = 20
         self.n_nucs -= 1
         self.gij = np.delete(self.gij, drop_i, 1)
         drop_tlens_index = self.polynom_modeling[:, drop_i] == 1
