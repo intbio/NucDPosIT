@@ -1,8 +1,8 @@
+from pysam_iterators import BaseWindowIterator, PysamOverlapingWindowIterator
+
 import numpy as np
-import pysam
 import os.path
 import warnings
-from abc import ABC, abstractmethod
 
 
 class AlignmentFileManager:
@@ -86,98 +86,14 @@ class AlignmentFileManager:
     
     def iterover(self, contig, iterover='template', win_len=300, start=None, stop=None, step=None):
         if iterover == 'template':
-            return PysamTemaplteWindowGenerator(self.alignment_file, contig, win_len, start, stop)
+            return BaseWindowIterator(self.alignment_file, contig, win_len, start, stop)
         if iterover == 'overlap':
-            return PysamOverlapingWindowGenerator(self.alignment_file, contig, win_len, start, stop, step)
+            return PysamOverlapingWindowIterator(self.alignment_file, contig, win_len, start, stop, step)
         raise ValueError(f"can not iterate over {iterover}. Available arguments are {availabel_iterovers}")
         
             
 # ---------------------------------------------------------------------------------------------------------------------            
             
-class AbstractWindowIterator(ABC):
-    def __init__(self, data_generator):
-        self.__generator = data_generator
-        
-    @property
-    def generator(self):
-        return self.__generator
-        
-    @abstractmethod
-    def __iter__(self):
-        pass
-    
-    @abstractmethod
-    def __next__(self):
-        pass
-    
-    @abstractmethod
-    def template_generator(self):
-        pass
-            
-            
-class BaseWindowIterator(AbstractWindowIterator):
-    def __init__(self, data_generator, pysam, contig, winlen=300, start=0, stop=None):
-        super().__init__(data_generator)
-        self.pysam = pysam
-        self.contig = contig
-        self.winlen = winlen
-        self.start = start
-        self.stop = stop 
-        
-    def __iter__(self):
-        return self
-    
-    def __next__(self):
-        batch = True
-        while batch:
-            new_batch = next(self.generator)
-            return new_batch
-        raise StopIteration
-        
-        
-class PysamTemaplteWindowGenerator(BaseWindowIterator):
-    def __init__(self, pysam, contig, winlen=300, start=0, stop=None):
-        super().__init__(self.template_generator(), pysam, contig, winlen, start, stop)
-    
-    def template_generator(self):
-        starts, stops = [], []
-        for record in self.pysam.fetch(self.contig, self.start, self.stop):
-            tlen = record.tlen
-            if tlen >= 0:
-                start, stop = record.reference_start, record.reference_start + tlen
-            else:
-                start, stop = record.reference_end + tlen, record.reference_end
-            starts.append(start)
-            stops.append(stop)
-            if len(starts) == self.winlen:    
-                batch = np.vstack([starts, stops]).T
-                starts, stops = [], []
-                yield batch
-        yield np.vstack([starts, stops]).T
-        
-
-class PysamOverlapingWindowGenerator(BaseWindowIterator):
-    def __init__(self, pysam, contig, winlen=300, start=0, stop=None, step=1):
-        super().__init__(self.template_generator(), pysam, contig, winlen, start, stop)
-        self.step = step
-        
-    def template_generator(self):
-        for start_cord in range(self.start, self.stop, self.step):
-            starts, stops = [], []
-            if start_cord + self.winlen > self.stop:
-                pysam_iter = self.pysam.fetch(self.contig, start_cord, self.stop)
-            else:
-                pysam_iter = self.pysam.fetch(self.contig, start_cord, start_cord + self.winlen)
-            for record in pysam_iter:
-                tlen = record.tlen
-                if tlen >= 0:
-                    start, stop = record.reference_start, record.reference_start + tlen
-                else:
-                    start, stop = record.reference_end + tlen, record.reference_end
-                starts.append(start)
-                stops.append(stop)
-            batch = np.vstack([starts, stops]).T
-            yield batch
         
 
         
