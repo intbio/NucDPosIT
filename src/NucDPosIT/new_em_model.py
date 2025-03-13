@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt 
 from sklearn.utils.validation import check_is_fitted
 from functools import lru_cache
+import pandas as pd
 
 
 class AbstractCoordinateProbsMixin(ABC):
@@ -325,6 +326,10 @@ class EMNucModel(BaseEstimator, ClusterMixin):
     @property
     def model(self):
         return self.__cluster_strategy_
+    
+    @property
+    def scoring_function(self):
+        return self.__scoring_function
         
     def __set_algorythm(self):
         if self.cluster_strategy == 'EM':
@@ -389,5 +394,87 @@ class EMNucModel(BaseEstimator, ClusterMixin):
     def cluster_occupancy(self):
         check_is_fitted(self)
         return self.model.cluster_occupancy()
+    
+    
+class EMNucViewer:
+    def __init__(self, emnuc_model, start, stop):
+        self.emnuc_model = emnuc_model
+        self.start = start
+        self.stop = stop
+        self.__window_df = None
+        self.__stat_df = None
+    
+    @property
+    def window_df(self):
+        if self.__window_df is None:
+            self.__window_df = self.__make_window_df()
+        return self.__window_df
+    
+    @property
+    def stat_df(self):
+        if self.__stat_df is None and self.__window_df is None:
+            self.__window_df = self.__make_window_df()
+            self.__stat_df = self.__make_stat_df(self.__window_df)
+        elif self.__stat_df is None:
+            self.__stat_df = self.__make_stat_df(self.__window_df)
+        return self.__stat_df
         
         
+    def __make_window_df(self):
+        batch = self.emnuc_model.X_
+        model = self.emnuc_model
+        prob_matrix = model.model.gij
+        window_data = pd.DataFrame(batch, columns=['start', 'stop'])
+        window_data['mid'] = (window_data.start + window_data.stop) / 2
+        nuc_indxex = np.argmax(prob_matrix, axis=1)
+        window_data["dyad"] = model.positions_[nuc_indxex]
+        window_data["dyadLH"] = np.max(prob_matrix, axis=1)
+        window_data["tempLH"] = model.model.X.sum(axis=1)
+        window_data['dyad_prob'] = model.weights_[nuc_indxex]
+        return window_data
+
+    def __make_stat_df(self, window_data):
+        group_size = window_data.groupby("dyad").size().reset_index()
+        group_size.name = 'size'
+        group_size.rename(columns={0: 'size'}, inplace=True)
+        window_data['stat'] = window_data.dyad - window_data.mid
+        window_data['stat'] = window_data.groupby('dyad', group_keys=False).stat.apply(lambda x: x  / x.std() )
+        window_data['stat'] = window_data['stat'] ** 2
+        norm1 = window_data.groupby('dyad').stat.agg(sum)
+        norm1.name = 'stat'
+        statistics = pd.merge(norm1, group_size, on='dyad').reset_index(drop=True)
+        p_values = [1 - spy.stats.chi2.cdf(row.stat, row['size']) for i, row in statistics.iterrows()]
+        statistics['p_vals'] = p_values
+        return statistics
+
+        
+    def make_coverage(self):
+        batch = self.emnuc_model.X_
+        x = np.zeros(self.stop - self.start + 400)
+        broad_start = self.start - 200
+        lefts, rights = batch[:, 0].astype(int), batch[:, 1].astype(int)
+        for left, right in zip(lefts, rights):
+            x[left - broad_start : right - broad_start + 1] += 1
+        return np.arange(self.start, self.stop), x[200 : -200]
+    
+    def model_occ(self, nuc_template):
+        dyads = self.stat_df.dyad.to_numpy()
+        dyad_weights = self.stat_df['size'].to_numpy()
+        return self.__make_model_occ(dyads, nuc_template, dyad_weights)
+    
+    def model_std(self, nuc_template):
+        dyads = self.stat_df.dyad.to_numpy()
+        dyad_weights = np.sqrt(self.stat_df['size'].to_numpy())
+        return self.__make_model_occ(dyads, nuc_template, dyad_weights)
+          
+    def __make_model_occ(self, dyads, nuc_template, dyad_weights=None):
+        start, end = self.start, self.stop
+        dyad_weights = np.ones_like(dyads) if dyad_weights is None else dyad_weights
+        broad_start, broad_end = start - nuc_template.size, end + nuc_template.size
+        x = np.arange(broad_start, broad_end)
+        y = np.zeros_like(x, dtype=float)
+        for i, dyad in enumerate(dyads):
+            start_pos = dyad - nuc_template.size // 2 - broad_start
+            end_pos = dyad - broad_start + nuc_template.size // 2
+            y[start_pos : end_pos] += nuc_template * dyad_weights[i]
+        return x[nuc_template.size : -nuc_template.size], y[nuc_template.size : -nuc_template.size]
