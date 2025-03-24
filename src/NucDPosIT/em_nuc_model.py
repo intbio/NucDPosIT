@@ -180,8 +180,6 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         pass
     
     def cluster_occupancy(self):
-        # class_occ = Counter(np.argmax(self.gij, axis=1))
-        # return np.array([class_occ[label] for label in range(self.n_nucs)])
         return self.gij.sum(axis=0)
     
     def log_score(self, batch):
@@ -448,37 +446,58 @@ class EMNucModel(BaseEstimator, ClusterMixin):
     
     
 class EMNucViewer:
-    def __init__(self, emnuc_model, start, stop):
-        self.emnuc_model = emnuc_model
+    def __init__(self, start, stop, emnuc_model=None):
         self.start = start
         self.stop = stop
-        self.__window_df = None
-        self.__stat_df = None
+        self.__window_df = self.__make_window_df(emnuc_model)
+        self.__stat_df = self.__make_stat_df(emnuc_model)
     
     @property
     def window_df(self):
-        return self.__make_window_df()
+        return self.__window_df
+    
+    @window_df.setter
+    def window_df(self, new_df):
+        self.window_df = new_df
     
     @property
     def stat_df(self):
-        window_df = self.window_df
-        return self.__make_stat_df(window_df)
+        return self.__stat_df
+    
+    @stat_df.setter
+    def stat_df(self, new_df):
+        self.stat_df = new_df
+    
+    def merge(self, new_model):
+        new_viewer = EMNucViewer(self.start, self.stop, new_model)
+        new_window_df = new_viewer.window_df
+        self.__window_df = pd.concat([new_window_df, self.window_df]) if self.__window_df is not None else new_window_df
+        new_stat_df = new_viewer.stat_df
+        self.__stat_df = pd.concat([new_stat_df, self.stat_df]) if self.__stat_df is not None else new_stat_df
+        return self
+    
+    def drop_duplicates(self):
+        self.__window_df = self.window_df.drop_duplicates()
+        self.__stat_df = self.stat_df.drop_duplicates()
         
-        
-    def __make_window_df(self):
-        batch = self.emnuc_model.X_
-        model = self.emnuc_model
+    def __make_window_df(self, model=None):
+        if model is None:
+            return None
+        batch = model.X_
         prob_matrix = model.model.gij
         window_data = pd.DataFrame(batch, columns=['start', 'stop'])
         window_data['mid'] = (window_data.start + window_data.stop) / 2
-        nuc_indxex = np.argmax(prob_matrix, axis=1)
+        nuc_indxex = np.argmax(model.model.gij, axis=1)
         window_data["dyad"] = model.positions_[nuc_indxex]
         window_data["dyadLH"] = np.max(prob_matrix, axis=1)
         window_data["tempLH"] = model.model.X.sum(axis=1)
         window_data['dyad_prob'] = model.weights_[nuc_indxex]
         return window_data
 
-    def __make_stat_df(self, window_data):
+    def __make_stat_df(self, model):
+        if model is None:
+            return None
+        window_data = self.window_df
         group_size = window_data.groupby("dyad").size().reset_index()
         group_size.name = 'size'
         group_size.rename(columns={0: 'size'}, inplace=True)
@@ -490,6 +509,11 @@ class EMNucViewer:
         statistics = pd.merge(norm1, group_size, on='dyad').reset_index(drop=True)
         p_values = [1 - spy.stats.chi2.cdf(row.stat, row['size']) for i, row in statistics.iterrows()]
         statistics['p_vals'] = p_values
+        
+        tmp = pd.DataFrame([model.positions_, model.cluster_occupancy(), model.model.weights], index=['dyad', 'height', 'weight']).T
+        tmp = tmp.groupby('dyad', as_index=False).sum()
+        statistics = pd.merge(statistics, tmp, on='dyad')
+    
         return statistics
     
     def plot(self, nuc_template, std_template, ax=None):
@@ -498,13 +522,13 @@ class EMNucViewer:
         x, coverage = self.make_coverage()
         model_coverage = self.model_occ(nuc_template)[1]
         model_std = self.model_std(std_template)[1]
-        ax.errorbar(x, model_coverage, yerr=model_std)
-        ax.plot(x, coverage)
-        ax.bar(self.emnuc_model.positions_, self.emnuc_model.cluster_occupancy(), 10)
+        ax.errorbar(x, model_coverage, yerr=model_std, label='model')
+        ax.plot(x, coverage, label='experiment')
+        ax.bar(self.stat_df.dyad.to_numpy(), self.stat_df.height.to_numpy(), 10, label='dyads')
         return ax
 
     def make_coverage(self):
-        batch = self.emnuc_model.X_
+        batch = self.window_df[['start', 'stop']].to_numpy()
         x = np.zeros(self.stop - self.start + 400)
         broad_start = self.start - 200
         lefts, rights = batch[:, 0].astype(int), batch[:, 1].astype(int)
@@ -513,13 +537,13 @@ class EMNucViewer:
         return np.arange(self.start, self.stop), x[200 : -200]
     
     def model_occ(self, nuc_template):
-        dyads = self.emnuc_model.positions_
-        dyad_weights = self.emnuc_model.cluster_occupancy()
-        return self.__make_model_occ(dyads, nuc_template, dyad_weights)
+        dyads = self.stat_df.dyad.to_numpy()
+        dyad_heights = self.stat_df.height.to_numpy()
+        return self.__make_model_occ(dyads, nuc_template, dyad_heights)
     
     def model_std(self, nuc_template):
-        dyads = self.emnuc_model.positions_
-        dyad_weights = np.sqrt(self.emnuc_model.cluster_occupancy())
+        dyads = self.stat_df.dyad.to_numpy()
+        dyad_weights = np.sqrt(self.stat_df.height.to_numpy())
         return self.__make_model_occ(dyads, nuc_template, dyad_weights)
           
     def __make_model_occ(self, dyads, nuc_template, dyad_weights=None):
