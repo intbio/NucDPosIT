@@ -3,6 +3,7 @@ from pysam_iterators import BaseWindowIterator, PysamOverlapingWindowIterator
 import numpy as np
 import os.path
 import warnings
+import pysam
 
 
 class AlignmentFileManager:
