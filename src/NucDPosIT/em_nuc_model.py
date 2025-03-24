@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt 
 from sklearn.utils.validation import check_is_fitted
 from functools import lru_cache
+import pandas as pd
 
 
 class AbstractCoordinateProbsMixin(ABC):
@@ -59,7 +60,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
 
 
 class AbstractEMStrategy(ABC):
-    def __init__(self, n_nucs, positions0, weights0, max_iter):
+    def __init__(self, n_nucs, positions0, weights0, max_iter, temp, tol):
         self.n_nucs = n_nucs
         self.positions = positions0
         self.weights = weights0
@@ -68,6 +69,8 @@ class AbstractEMStrategy(ABC):
         self.__m = None
         self.__nofreads = None
         self.__X = None
+        self.__temp = temp
+        self.__tol = tol
         
     @property
     def gij(self):
@@ -100,11 +103,26 @@ class AbstractEMStrategy(ABC):
     @X.setter
     def X(self, newX):
         self.__X = newX
+        
+    @property
+    def temp(self):
+        return self.__temp
     
+    @temp.setter
+    def temp(self, new_temp):
+        self.__temp = new_temp
+    
+    @property
+    def tol(self):
+        return self.__tol
+    
+    @tol.setter
+    def tol(self, new_tol):
+        self.__tol = new_tol
     
 class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, max_iter, fit_res):
-        AbstractEMStrategy.__init__(self, n_nucs, positions0, weights0, max_iter)
+    def __init__(self, n_nucs, positions0, weights0, max_iter, fit_res, temp, tol):
+        AbstractEMStrategy.__init__(self, n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol)
         CoordinateProbsMixin.__init__(self, fit_res)
         self.offset = None
 
@@ -142,16 +160,29 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         
     def run_strategy(self, left_cords, right_cords):
         self._init_fields(left_cords, right_cords)
+        self.__crit = 1000
         for i in tqdm(range(self.max_iter), total=self.max_iter):
+            old_weights = self.weights.copy()
             self.E_step(left_cords, right_cords)
             self.M_step()
+            delta_weights = self.__evaluate_weights(old_weights)
+            # print(i, delta_weights)
+            if delta_weights < self.tol:
+                break
+                
+    def __evaluate_weights(self, old_weights):
+        crit = self.temp * np.sum(np.abs(self.weights - old_weights)) + (1 - self.temp) * self.__crit
+        self.__crit = crit
+        return crit
+        
         
     def detect_outliers_index(self):
         pass
     
     def cluster_occupancy(self):
-        class_occ = Counter(np.argmax(self.gij, axis=1))
-        return np.array([class_occ[label] for label in range(self.n_nucs)])
+        # class_occ = Counter(np.argmax(self.gij, axis=1))
+        # return np.array([class_occ[label] for label in range(self.n_nucs)])
+        return self.gij.sum(axis=0)
     
     def log_score(self, batch):
         left_cords, right_cords = batch[:, 0], batch[:, 1]
@@ -160,7 +191,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
             X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j])
         p_x = X @ self.weights.T
         p_x[p_x == 0] = 1e-100
-        score = np.sum(np.log(p_x)) / self.n_nucs
+        score = np.sum(np.log(p_x))
         return score
     
     def predict(self, X):
@@ -172,8 +203,8 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
   
     
 class AdditionCompStrategy(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, fit_res, max_iter)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, temp, tol, max_iter):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
         
     def E_step(self, left_cords, right_cords):
         super().E_step(left_cords, right_cords)
@@ -188,16 +219,13 @@ class AdditionCompStrategy(BaseEMStrategy):
         new_gij_column = np.zeros((self.gij.shape[0], 1))
         new_gij_column[out_ind] = 1
         self.gij = np.hstack((self.gij, new_gij_column))
-        print("add component")
+        # print("add component")
         
-    def detect_outliers_index(self):
-        
-        return outliers_ind
         
 
 class StochasticEMStrategy(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, fit_res, max_iter)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
         self.polynom_modeling = None
         
     def S_step(self):
@@ -214,11 +242,14 @@ class StochasticEMStrategy(BaseEMStrategy):
     def _init_fields(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
         self.polynom_modeling = np.zeros_like(self.gij)
+        
+    def run_strategy(self, left_cords, right_cords):
+        super().run_strategy(left_cords, right_cords)
 
         
 class DropingStochasticEMStrategy(StochasticEMStrategy):
-    def __init__(self, max_comp, alpha, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(max_comp, positions0, weights0, fit_res, max_iter)
+    def __init__(self, max_comp, alpha, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=max_comp, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, alpha=alpha)
         self.alpha = alpha
         self.min_incluster = None
         self.drop_counter = 100
@@ -257,48 +288,48 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
 
 # ----------------------------------------------------------------------------------------------
 class EMAlgorythm(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, max_iter, fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
 
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
       
         
 class AdditionEMAlgorythm(AdditionCompStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, max_iter, fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
         
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
         
 
 class StochasticEMAlgorythm(StochasticEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, max_iter, fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+        
+    def M_step(self):
+        self.S_step()
+        super().M_step() 
 
     def run_strategy(self, left_cords, right_cords):
-        super()._init_fields(left_cords, right_cords)
-        for i in tqdm(range(self.max_iter), total=self.max_iter):
-            self.E_step(left_cords, right_cords)
-            self.S_step()
-            self.M_step()  
+        super().run_strategy(left_cords, right_cords)
             
             
 class DropingStochasticEMAlgorythm(DropingStochasticEMStrategy):
-    def __init__(self, max_comp, positions0, weights0, fit_res, max_iter=500, alpha=0.05):
-        super().__init__(max_comp, alpha, positions0, weights0, fit_res, max_iter)
+    def __init__(self, max_comp, positions0, weights0, fit_res, max_iter, alpha, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, alpha=alpha)
         
     def run_strategy(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
-        for i in tqdm(range(self.max_iter), total=self.max_iter):
+        for i in tqdm(range(self.max_iter), total=self.max_iter, leav=False):
             self.E_step(left_cords, right_cords)
             self.S_step()
             self.M_step() 
         
 
 class AdditionStochasticEMAlgorythm(StochasticEMAlgorythm, AdditionCompStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter=500):
-        super().__init__(n_nucs, positions0, weights0, fit_res, max_iter)   
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)   
         
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
@@ -307,74 +338,83 @@ class AdditionStochasticEMAlgorythm(StochasticEMAlgorythm, AdditionCompStrategy)
         super().add_component(out_ind, left_cords, right_cords)
         self.polynom_modeling = np.zeros_like(self.gij)
         
-# ----------------------------------------------------------------------------------------
-        
+
+# -----------------------------------------------------------------------------------------------------------------------     
 class EMNucModel(BaseEstimator, ClusterMixin):
-    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000, alpha=0.05):
+    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000, drop_treshold=0.05, temp=0.3, tol=0.04):
         self.n_nucs = n_nucs
         self.max_iter = max_iter
         self.cluster_strategy = cluster_strategy
         self.max_iter = max_iter
-        self.fit_res = fit_res
-        self.alpha = alpha
+        self.__fit_res = fit_res
+        self.drop_treshold = drop_treshold
+        self.positions_ = None
+        self.weights_ = None
+        self.temp = temp
+        self.tol = tol
+        
+    @property
+    def fit_res(self):
+        return self.__fit_res
+        
+    @property
+    def model(self):
+        return self.__cluster_strategy_
     
-#     @property
-#     def n_nucs(self):
-#         return self.__n_nucs
+    @property
+    def scoring_function(self):
+        return self.__scoring_function
         
-#     @n_nucs.setter
-#     def n_nucs(self, new_n_nucs):
-        
-                                                                                                        
-
-    def __validate_weights(self, weights):
-        if weights.size != self.n_nucs:
-            raise AttributeError("size of weights should be equal n_nucs")
-        return weights
-
-    def init_params(self, X):
-        kmeans = KMeans(self.n_nucs)
-        kmeans.fit(X)
-        self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
-        cluster_counts = Counter(kmeans.predict(X))
+    def __set_algorythm(self):
+        if self.cluster_strategy == 'EM':
+            self.__cluster_strategy_ = EMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol)
+        elif self.cluster_strategy == 'SEM':
+            self.__cluster_strategy_ = StochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol)
+        elif self.cluster_strategy == 'DROPSEM':
+            self.__cluster_strategy_ = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.drop_treshold, self.fit_res, self.max_iter, self.temp, self.tol)
+        else:
+            raise ValueError()
+            
+    def __set_initial_params(self, X):
+        min_x, max_x = X[:, 0].min(), X[:, 1].max()
+        mids = X.mean(axis=1).reshape(-1, 1)
+        positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
+        dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
+        cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
         w0 = np.array(
             [
                 cluster_counts[cluster_label]
-                for cluster_label in range(kmeans.n_clusters)
+                for cluster_label in range(self.n_nucs)
             ]
         )
-        self.weights_ = w0 / w0.sum()
+        weights_ = w0 / w0.sum()
+        self.positions_ = positions_
+        self.weights_ = weights_
 
-    def fit(self, X, weights0=None, positions0=None, y=None):
+        # kmeans = KMeans(self.n_nucs)
+        # kmeans.fit(X)
+        # self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
+        # cluster_counts = Counter(kmeans.predict(X))
+        # w0 = np.array(
+        #     [
+        #         cluster_counts[cluster_label]
+        #         for cluster_label in range(kmeans.n_clusters)
+        #     ]
+        # )
+        # self.weights_ = w0 / w0.sum() 
+        
+        
+        
+    def __validate_X(self, X):
+        lefts, rights = X[:, 0], X[:, 1]
+        return lefts, rights
+            
+    def fit(self, X, y=None):
         self.X_ = X
         self.y_ = y
-
-        if weights0 is not None and positions0 is not None:
-            self.weights_, self.positions_ = weights0, positions0
-        elif weights0 is None and positions0 is None:
-            self.init_params(X)
-        else:
-            raise AttributeError(
-                "initial positions and weights should be passed both or not pased at all"
-            )
-
-        if self.cluster_strategy == "EM":
-            self.model = EMAlgorythm(
-                self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter
-            )
-        elif self.cluster_strategy == "SEM":
-            self.model = StochasticEMAlgorythm(
-                self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter
-            )
-        elif self.cluster_strategy == 'ADDEM':
-            self.model = AdditionEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter)
-        elif self.cluster_strategy == 'ADDSEM':
-            self.model = AdditionStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter)
-        elif self.cluster_strategy == 'DROPSEM':
-            self.model = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.max_iter, self.fit_res, alpha=self.alpha)
-        else:
-            raise AttributeError("cluster strategy can be SEM, EM, DROPSEM, ADDEM or ADDSEM")
-
+        self.__set_initial_params(X)
+        self.__set_algorythm()
+        lefts, rights = self.__validate_X(X)
         try:
             self.model.run_strategy(self.X_[:, 0], self.X_[:, 1])
         except Exception as e:
@@ -384,7 +424,8 @@ class EMNucModel(BaseEstimator, ClusterMixin):
             self.labels_ = self.predict(X)
             self.is_fitted_ = True
         return self
-
+    
+    
     def fit_predict(self, X, weights0, positions0, y=None):
         self.fit(X, weights0, positions0, y)
         return self.labels_
@@ -405,3 +446,90 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         check_is_fitted(self)
         return self.model.cluster_occupancy()
     
+    
+class EMNucViewer:
+    def __init__(self, emnuc_model, start, stop):
+        self.emnuc_model = emnuc_model
+        self.start = start
+        self.stop = stop
+        self.__window_df = None
+        self.__stat_df = None
+    
+    @property
+    def window_df(self):
+        return self.__make_window_df()
+    
+    @property
+    def stat_df(self):
+        window_df = self.window_df
+        return self.__make_stat_df(window_df)
+        
+        
+    def __make_window_df(self):
+        batch = self.emnuc_model.X_
+        model = self.emnuc_model
+        prob_matrix = model.model.gij
+        window_data = pd.DataFrame(batch, columns=['start', 'stop'])
+        window_data['mid'] = (window_data.start + window_data.stop) / 2
+        nuc_indxex = np.argmax(prob_matrix, axis=1)
+        window_data["dyad"] = model.positions_[nuc_indxex]
+        window_data["dyadLH"] = np.max(prob_matrix, axis=1)
+        window_data["tempLH"] = model.model.X.sum(axis=1)
+        window_data['dyad_prob'] = model.weights_[nuc_indxex]
+        return window_data
+
+    def __make_stat_df(self, window_data):
+        group_size = window_data.groupby("dyad").size().reset_index()
+        group_size.name = 'size'
+        group_size.rename(columns={0: 'size'}, inplace=True)
+        window_data['stat'] = window_data.dyad - window_data.mid
+        window_data['stat'] = window_data.groupby('dyad', group_keys=False).stat.apply(lambda x: x  / x.std() )
+        window_data['stat'] = window_data['stat'] ** 2
+        norm1 = window_data.groupby('dyad').stat.agg(sum)
+        norm1.name = 'stat'
+        statistics = pd.merge(norm1, group_size, on='dyad').reset_index(drop=True)
+        p_values = [1 - spy.stats.chi2.cdf(row.stat, row['size']) for i, row in statistics.iterrows()]
+        statistics['p_vals'] = p_values
+        return statistics
+    
+    def plot(self, nuc_template, std_template, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots()
+        x, coverage = self.make_coverage()
+        model_coverage = self.model_occ(nuc_template)[1]
+        model_std = self.model_std(std_template)[1]
+        ax.errorbar(x, model_coverage, yerr=model_std)
+        ax.plot(x, coverage)
+        ax.bar(self.emnuc_model.positions_, self.emnuc_model.cluster_occupancy(), 10)
+        return ax
+
+    def make_coverage(self):
+        batch = self.emnuc_model.X_
+        x = np.zeros(self.stop - self.start + 400)
+        broad_start = self.start - 200
+        lefts, rights = batch[:, 0].astype(int), batch[:, 1].astype(int)
+        for left, right in zip(lefts, rights):
+            x[left - broad_start : right - broad_start + 1] += 1
+        return np.arange(self.start, self.stop), x[200 : -200]
+    
+    def model_occ(self, nuc_template):
+        dyads = self.emnuc_model.positions_
+        dyad_weights = self.emnuc_model.cluster_occupancy()
+        return self.__make_model_occ(dyads, nuc_template, dyad_weights)
+    
+    def model_std(self, nuc_template):
+        dyads = self.emnuc_model.positions_
+        dyad_weights = np.sqrt(self.emnuc_model.cluster_occupancy())
+        return self.__make_model_occ(dyads, nuc_template, dyad_weights)
+          
+    def __make_model_occ(self, dyads, nuc_template, dyad_weights=None):
+        start, end = self.start, self.stop
+        dyad_weights = np.ones_like(dyads) if dyad_weights is None else dyad_weights
+        broad_start, broad_end = start - nuc_template.size, end + nuc_template.size
+        x = np.arange(broad_start, broad_end)
+        y = np.zeros_like(x, dtype=float)
+        for i, dyad in enumerate(dyads):
+            start_pos = dyad - nuc_template.size // 2 - broad_start
+            end_pos = dyad - broad_start + nuc_template.size // 2
+            y[start_pos : end_pos] += nuc_template * dyad_weights[i]
+        return x[nuc_template.size : -nuc_template.size], y[nuc_template.size : -nuc_template.size]
