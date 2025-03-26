@@ -1,3 +1,5 @@
+from func_utils import multinomial_rvs, jit_get_left_prob, jit_get_right_prob
+
 from abc import ABC, abstractmethod
 import sklearn as sk
 from sklearn.cluster import KMeans
@@ -31,10 +33,8 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     
     @lru_cache(1024)
     def __get_left_prob(self, left_cord, dyad_pos):
-        i = dyad_pos - left_cord - 23
-        if i < 0 or i >= len(self.fit_res):
-            return 0
-        return self.fit_res[i]
+        return jit_get_left_prob(left_cord, dyad_pos, self.fit_res)
+        
 
     def get_left_prob(self, left_cord, dyad_pos):
         return np.array(
@@ -43,10 +43,7 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     
     @lru_cache(1024)
     def __get_right_prob(self, right_cord, dyad_pos):
-        i = right_cord - dyad_pos - 23
-        if i < 0 or i >= len(self.fit_res):
-            return 0
-        return self.fit_res[i]
+        return jit_get_right_prob(right_cord, dyad_pos, self.fit_res)
 
     def get_right_prob(self, right_cord, dyad_pos):
         return np.array(
@@ -227,10 +224,7 @@ class StochasticEMStrategy(BaseEMStrategy):
         self.polynom_modeling = None
         
     def S_step(self):
-        for i in range(self.nofreads):
-            gij_row = np.absolute(self.gij[i, :])
-            multi_probs = np.random.multinomial(1, gij_row)
-            self.polynom_modeling[i, :] = multi_probs
+        self.polynom_modeling = multinomial_rvs(self.nofreads, self.gij)
         self.weights = self.polynom_modeling.sum(0) / self.nofreads
         self.weights /= self.weights.sum()
 
@@ -376,7 +370,8 @@ class EMNucModel(BaseEstimator, ClusterMixin):
     def __set_initial_params(self, X):
         min_x, max_x = X[:, 0].min(), X[:, 1].max()
         mids = X.mean(axis=1).reshape(-1, 1)
-        positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
+        # positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
+        positions_ = np.random.uniform(min_x, max_x + 1, self.n_nucs).astype(int)
         dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
         cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
         w0 = np.array(
