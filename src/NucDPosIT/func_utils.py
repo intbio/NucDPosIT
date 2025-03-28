@@ -1,7 +1,7 @@
 import numpy as np
 from numba import jit
 
-@jit
+# @jit
 def multinomial_rvs(n, p):
     """
     Sample from the multinomial distribution with multiple p vectors.
@@ -16,7 +16,8 @@ def multinomial_rvs(n, p):
     out = np.zeros(p.shape, dtype=int)
     ps = p.cumsum(axis=-1)
     # Conditional probabilities
-    condp = p / ps
+    with np.errstate(divide='ignore', invalid='ignore'):
+        condp = p / ps
     condp[np.isnan(condp)] = 0.0
     for i in range(p.shape[-1]-1, 0, -1):
         binsample = np.random.binomial(count, condp[..., i])
