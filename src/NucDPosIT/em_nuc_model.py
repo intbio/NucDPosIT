@@ -23,7 +23,7 @@ class AbstractCoordinateProbsMixin(ABC):
         return self.__fit_res
     
     @abstractmethod
-    def get_tlen_prob(self, left_cord, right_cord, dyad_pos):
+    def get_tlen_prob(self, left_cords, right_cords, dyad_positions, n_nucs):
         pass
 
     
@@ -31,27 +31,24 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
     def __init__(self, fit_res):
         super().__init__(fit_res)
     
-    @lru_cache(1024)
-    def __get_left_prob(self, left_cord, dyad_pos):
-        return jit_get_left_prob(left_cord, dyad_pos, self.fit_res)
-        
+    def get_left_prob(self, left_cords, dyad_positions, n_nucs):
+        return self.__get_prob_matrix(left_cords, dyad_positions, n_nucs)
 
-    def get_left_prob(self, left_cord, dyad_pos):
-        return np.array(
-            list(map(lambda x: self.__get_left_prob(x, dyad_pos), left_cord))
-        )
-    
-    @lru_cache(1024)
-    def __get_right_prob(self, right_cord, dyad_pos):
-        return jit_get_right_prob(right_cord, dyad_pos, self.fit_res)
+    def __get_prob_matrix(self, left_cords, dyad_positions, n_nucs, offset=23):
+        left_cord_matrix = np.repeat(left_cords.reshape(-1, 1), n_nucs, axis=1)
+        dyad_matrix = np.repeat(dyad_positions.reshape(1, -1), left_cords.shape[0], axis=0)
+        index_matrix = -left_cord_matrix + dyad_matrix - offset
+        mask = np.abs(index_matrix) > self.fit_res.shape[0] - 1
+        index_matrix[mask] = 0
+        left_probs = self.fit_res[index_matrix]
+        left_probs[mask] = 0
+        return left_probs
 
-    def get_right_prob(self, right_cord, dyad_pos):
-        return np.array(
-            list(map(lambda x: self.__get_right_prob(x, dyad_pos), right_cord))
-        )
+    def get_right_prob(self, right_cords, dyad_positions, n_nucs):
+        return self.__get_prob_matrix(-right_cords, -dyad_positions, n_nucs)
     
-    def get_tlen_prob(self, left_cord, right_cord, dyad_pos):
-        return self.get_left_prob(left_cord, dyad_pos) * self.get_right_prob(right_cord, dyad_pos)
+    def get_tlen_prob(self, left_cords, right_cords, dyad_positions, n_nucs):
+        return self.get_left_prob(left_cords, dyad_positions, n_nucs) * self.get_right_prob(right_cords, dyad_positions, n_nucs)
             
 # -----------------------------------------------------------------------------------
 
@@ -124,8 +121,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         self.offset = None
 
     def E_step(self, left_cords, right_cords):
-        for j in range(self.n_nucs):
-            self.X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j]) * self.weights[j]
+        self.X = self.get_tlen_prob(left_cords, right_cords, self.positions, self.n_nucs) * self.weights
         p_x = self.weights @ self.X.T
         p_x[p_x == 0] = 1e-100
         self.gij = self.X / p_x.reshape(-1, 1)
@@ -140,10 +136,8 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
         max_right_cord = right_cords.max() 
         min_left_cord = left_cords.min()
         nofreads = left_cords.shape[0]
-        m = np.zeros((nofreads, max_right_cord - min_left_cord + 1))
-        for j, dyad in enumerate(range(min_left_cord, max_right_cord + 1)):
-            probs = self.get_tlen_prob(left_cords, right_cords, dyad)
-            m[:, j] = probs
+        dyads = np.arange(min_left_cord, max_right_cord + 1)
+        m = self.get_tlen_prob(left_cords, right_cords, dyads, dyads.shape[0])
         m[m == 0] = 1e-100
         m = np.log(m)
         return m
@@ -181,9 +175,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
     
     def log_score(self, batch):
         left_cords, right_cords = batch[:, 0], batch[:, 1]
-        X = np.zeros((left_cords.size, self.n_nucs))
-        for j in range(self.n_nucs):
-            X[:, j] = self.get_tlen_prob(left_cords, right_cords, self.positions[j])
+        X = self.get_tlen_prob(left_cords, right_cords, self.positions, self.n_nucs)
         p_x = X @ self.weights.T
         p_x[p_x == 0] = 1e-100
         score = np.sum(np.log(p_x))
@@ -368,33 +360,33 @@ class EMNucModel(BaseEstimator, ClusterMixin):
             raise ValueError()
             
     def __set_initial_params(self, X):
-        min_x, max_x = X[:, 0].min(), X[:, 1].max()
-        mids = X.mean(axis=1).reshape(-1, 1)
+        # min_x, max_x = X[:, 0].min(), X[:, 1].max()
+        # mids = X.mean(axis=1).reshape(-1, 1)
         # positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
-        positions_ = np.random.uniform(min_x, max_x + 1, self.n_nucs).astype(int)
-        dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
-        cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
-        w0 = np.array(
-            [
-                cluster_counts[cluster_label]
-                for cluster_label in range(self.n_nucs)
-            ]
-        )
-        weights_ = w0 / w0.sum()
-        self.positions_ = positions_
-        self.weights_ = weights_
-
-        # kmeans = KMeans(self.n_nucs)
-        # kmeans.fit(X)
-        # self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
-        # cluster_counts = Counter(kmeans.predict(X))
+        # # positions_ = np.random.uniform(min_x, max_x + 1, self.n_nucs).astype(int)
+        # dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
+        # cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
         # w0 = np.array(
         #     [
         #         cluster_counts[cluster_label]
-        #         for cluster_label in range(kmeans.n_clusters)
+        #         for cluster_label in range(self.n_nucs)
         #     ]
         # )
-        # self.weights_ = w0 / w0.sum() 
+        # weights_ = w0 / w0.sum()
+        # self.positions_ = positions_
+        # self.weights_ = weights_
+
+        kmeans = KMeans(self.n_nucs)
+        kmeans.fit(X)
+        self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
+        cluster_counts = Counter(kmeans.predict(X))
+        w0 = np.array(
+            [
+                cluster_counts[cluster_label]
+                for cluster_label in range(kmeans.n_clusters)
+            ]
+        )
+        self.weights_ = w0 / w0.sum() 
         
         
         
