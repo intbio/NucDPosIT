@@ -61,7 +61,7 @@ class AlignmentFileManager:
     
     def __check_input_path(self, input_path):
         if self.file_format == 'bam':
-            return pysam.pysam.AlignmentFile(input_path, "rb")
+            return pysam.pysam.AlignmentFile(input_path, "rb", check_sq=False)
         if self.file_format == 'sam':
             filename, file_extension = os.path.splitext(input_path)
             bam_filename = f"{filename.split('/')[-1]}.bam"
