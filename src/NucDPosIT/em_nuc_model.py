@@ -32,9 +32,10 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
         super().__init__(fit_res)
     
     def get_left_prob(self, left_cords, dyad_positions, n_nucs):
-        return self.__get_prob_matrix(left_cords, dyad_positions, n_nucs)
+        return self.__get_prob_matrix(left_cords, dyad_positions)
 
-    def __get_prob_matrix(self, left_cords, dyad_positions, n_nucs, offset=23):
+    def __get_prob_matrix(self, left_cords, dyad_positions, offset=23):
+        n_nucs = dyad_positions.shape[0]
         left_cord_matrix = np.repeat(left_cords.reshape(-1, 1), n_nucs, axis=1)
         dyad_matrix = np.repeat(dyad_positions.reshape(1, -1), left_cords.shape[0], axis=0)
         index_matrix = -left_cord_matrix + dyad_matrix - offset
@@ -45,9 +46,10 @@ class CoordinateProbsMixin(AbstractCoordinateProbsMixin):
         return left_probs
 
     def get_right_prob(self, right_cords, dyad_positions, n_nucs):
-        return self.__get_prob_matrix(-right_cords, -dyad_positions, n_nucs)
+        return self.__get_prob_matrix(-right_cords, -dyad_positions)
     
-    def get_tlen_prob(self, left_cords, right_cords, dyad_positions, n_nucs):
+    def get_tlen_prob(self, left_cords, right_cords, dyad_positions):
+        n_nucs = dyad_positions.shape[0]
         return self.get_left_prob(left_cords, dyad_positions, n_nucs) * self.get_right_prob(right_cords, dyad_positions, n_nucs)
             
 # -----------------------------------------------------------------------------------
@@ -115,29 +117,34 @@ class AbstractEMStrategy(ABC):
         self.__tol = new_tol
     
 class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, max_iter, fit_res, temp, tol):
+    def __init__(self, n_nucs, positions0, weights0, max_iter, fit_res, temp, tol, tau=0):
         AbstractEMStrategy.__init__(self, n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol)
         CoordinateProbsMixin.__init__(self, fit_res)
         self.offset = None
+        self.tau = tau
 
-    def E_step(self, left_cords, right_cords):
-        self.X = self.get_tlen_prob(left_cords, right_cords, self.positions, self.n_nucs) * self.weights
+    def E_step(self, left_cords, right_cords):        
+        self.X = self.get_tlen_prob(left_cords, right_cords, self.positions) * self.weights
         p_x = self.weights @ self.X.T
         p_x[p_x == 0] = 1e-100
         self.gij = self.X / p_x.reshape(-1, 1)
         self.gij = self.gij / (self.gij.sum(axis=1).reshape(-1, 1) + 1e-100)
+
         
-    def M_step(self):
+    def M_step(self):        
         self.positions = np.argmax(self.gij.T @ self.m, axis=1) + self.offset
-        self.weights = self.gij.sum(axis=0) / self.nofreads
-        # self.weights /= self.weights.sum()
+        self.weights = self.gij.sum(axis=0) / self.nofreads - self.tau
+        if np.any(self.weights < 0):
+            self.weights[self.weights < 0] = 0
+            self.weights = self.weights / self.weights.sum()
+
         
     def set_m_matrix(self, left_cords, right_cords):
         max_right_cord = right_cords.max() 
         min_left_cord = left_cords.min()
         nofreads = left_cords.shape[0]
         dyads = np.arange(min_left_cord, max_right_cord + 1)
-        m = self.get_tlen_prob(left_cords, right_cords, dyads, dyads.shape[0])
+        m = self.get_tlen_prob(left_cords, right_cords, dyads)
         m[m == 0] = 1e-100
         m = np.log(m)
         return m
@@ -152,7 +159,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
     def run_strategy(self, left_cords, right_cords):
         self._init_fields(left_cords, right_cords)
         self.__crit = 1000
-        for i in tqdm(range(self.max_iter), total=self.max_iter):
+        for i in tqdm(range(self.max_iter), total=self.max_iter, leave=False):
             old_weights = self.weights.copy()
             self.E_step(left_cords, right_cords)
             self.M_step()
@@ -175,7 +182,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
     
     def log_score(self, batch):
         left_cords, right_cords = batch[:, 0], batch[:, 1]
-        X = self.get_tlen_prob(left_cords, right_cords, self.positions, self.n_nucs)
+        X = self.get_tlen_prob(left_cords, right_cords, self.positions)
         p_x = X @ self.weights.T
         p_x[p_x == 0] = 1e-100
         score = np.sum(np.log(p_x))
@@ -190,8 +197,8 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
   
     
 class AdditionCompStrategy(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, temp, tol, max_iter):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, temp, tol, max_iter, tau=0):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         
     def E_step(self, left_cords, right_cords):
         super().E_step(left_cords, right_cords)
@@ -211,14 +218,17 @@ class AdditionCompStrategy(BaseEMStrategy):
         
 
 class StochasticEMStrategy(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         self.polynom_modeling = None
         
     def S_step(self):
         self.polynom_modeling = multinomial_rvs(self.nofreads, self.gij)
         self.weights = self.polynom_modeling.sum(0) / self.nofreads
-        self.weights /= self.weights.sum()
+        self.weights /= self.weights.sum() - self.tau
+        if np.any(self.weights < 0):
+            self.weights[self.weights < 0] = 0
+            self.weights = self.weights / self.weights.sum()
 
     def M_step(self):
         self.positions = np.argmax(self.polynom_modeling.T @ self.m, axis=1) + self.offset
@@ -232,11 +242,11 @@ class StochasticEMStrategy(BaseEMStrategy):
 
         
 class DropingStochasticEMStrategy(StochasticEMStrategy):
-    def __init__(self, max_comp, alpha, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=max_comp, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, alpha=alpha)
+    def __init__(self, max_comp, alpha, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs=max_comp, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         self.alpha = alpha
         self.min_incluster = None
-        self.drop_counter = 100
+        self.drop_counter = 30
         
     def _init_fields(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
@@ -264,32 +274,30 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
         self.weights = np.delete(self.weights, drop_i)
         super().E_step(left_cords, right_cords)
         
-    def cluster_occupancy(self):
-        return self.polynom_modeling.sum(0)
         
     
 
 
 # ----------------------------------------------------------------------------------------------
 class EMAlgorythm(BaseEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
 
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
       
         
 class AdditionEMAlgorythm(AdditionCompStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
         
 
 class StochasticEMAlgorythm(StochasticEMStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         
     def M_step(self):
         self.S_step()
@@ -300,20 +308,20 @@ class StochasticEMAlgorythm(StochasticEMStrategy):
             
             
 class DropingStochasticEMAlgorythm(DropingStochasticEMStrategy):
-    def __init__(self, max_comp, positions0, weights0, fit_res, max_iter, alpha, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, alpha=alpha)
+    def __init__(self, max_comp, positions0, weights0, fit_res, max_iter, alpha, temp, tol, tau=0):
+        super().__init__(max_comp, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, alpha=alpha, tau=tau)
         
     def run_strategy(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
-        for i in tqdm(range(self.max_iter), total=self.max_iter, leav=False):
+        for i in tqdm(range(self.max_iter), total=self.max_iter, leave=False):
             self.E_step(left_cords, right_cords)
             self.S_step()
             self.M_step() 
         
 
 class AdditionStochasticEMAlgorythm(StochasticEMAlgorythm, AdditionCompStrategy):
-    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol):
-        super().__init__(n_nucs=n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res)   
+    def __init__(self, n_nucs, positions0, weights0, fit_res, max_iter, temp, tol, tau=0):
+        super().__init__(n_nucs, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)   
         
     def run_strategy(self, left_cords, right_cords):
         super().run_strategy(left_cords, right_cords)
@@ -325,17 +333,18 @@ class AdditionStochasticEMAlgorythm(StochasticEMAlgorythm, AdditionCompStrategy)
 
 # -----------------------------------------------------------------------------------------------------------------------     
 class EMNucModel(BaseEstimator, ClusterMixin):
-    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000, drop_treshold=0.05, temp=0.3, tol=0.04):
+    def __init__(self, n_nucs, cluster_strategy, fit_res, max_iter=1000, drop_treshold=0.05, temp=0.3, tol=0.04, tau=0, positions_=None, weights_=None):
         self.n_nucs = n_nucs
         self.max_iter = max_iter
         self.cluster_strategy = cluster_strategy
         self.max_iter = max_iter
         self.__fit_res = fit_res
         self.drop_treshold = drop_treshold
-        self.positions_ = None
-        self.weights_ = None
+        self.positions_ = positions_
+        self.weights_ = weights_
         self.temp = temp
         self.tol = tol
+        self.tau = tau
         
     @property
     def fit_res(self):
@@ -351,42 +360,43 @@ class EMNucModel(BaseEstimator, ClusterMixin):
         
     def __set_algorythm(self):
         if self.cluster_strategy == 'EM':
-            self.__cluster_strategy_ = EMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol)
+            self.__cluster_strategy_ = EMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol, tau=self.tau)
         elif self.cluster_strategy == 'SEM':
-            self.__cluster_strategy_ = StochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol)
+            self.__cluster_strategy_ = StochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.temp, self.tol, tau=self.tau)
         elif self.cluster_strategy == 'DROPSEM':
-            self.__cluster_strategy_ = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.drop_treshold, self.fit_res, self.max_iter, self.temp, self.tol)
+            self.__cluster_strategy_ = DropingStochasticEMAlgorythm(self.n_nucs, self.positions_, self.weights_, self.fit_res, self.max_iter, self.drop_treshold, self.temp, tol=self.tol, tau=self.tau)
         else:
             raise ValueError()
             
     def __set_initial_params(self, X):
-        # min_x, max_x = X[:, 0].min(), X[:, 1].max()
-        # mids = X.mean(axis=1).reshape(-1, 1)
-        # positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
-        # # positions_ = np.random.uniform(min_x, max_x + 1, self.n_nucs).astype(int)
-        # dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
-        # cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
-        # w0 = np.array(
-        #     [
-        #         cluster_counts[cluster_label]
-        #         for cluster_label in range(self.n_nucs)
-        #     ]
-        # )
-        # weights_ = w0 / w0.sum()
-        # self.positions_ = positions_
-        # self.weights_ = weights_
+        if self.positions_ is None and self.weights_ is None:
+            min_x, max_x = X[:, 0].min(), X[:, 1].max()
+            # mids = X.mean(axis=1).reshape(-1, 1)
+            # # positions_ = np.linspace(min_x, max_x, self.n_nucs).astype(int)
+            positions_ = np.random.uniform(min_x, max_x + 1, self.n_nucs).astype(int)
+            # dist_matrx = spy.spatial.distance.cdist(positions_.reshape(-1, 1), mids)
+            # cluster_counts = Counter(np.argmin(dist_matrx, axis=0))
+            # w0 = np.array(
+            #     [
+            #         cluster_counts[cluster_label]
+            #         for cluster_label in range(self.n_nucs)
+            #     ]
+            # )
+            # weights_ = w0 / w0.sum()
+            self.positions_ = positions_
+            self.weights_ = np.array([1 / self.n_nucs] * self.n_nucs)
 
-        kmeans = KMeans(self.n_nucs)
-        kmeans.fit(X)
-        self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
-        cluster_counts = Counter(kmeans.predict(X))
-        w0 = np.array(
-            [
-                cluster_counts[cluster_label]
-                for cluster_label in range(kmeans.n_clusters)
-            ]
-        )
-        self.weights_ = w0 / w0.sum() 
+            # kmeans = KMeans(self.n_nucs)
+            # kmeans.fit(X)
+            # self.positions_ = kmeans.cluster_centers_.sum(1).astype(int) // 2
+            # cluster_counts = Counter(kmeans.predict(X))
+            # w0 = np.array(
+            #     [
+            #         cluster_counts[cluster_label]
+            #         for cluster_label in range(kmeans.n_clusters)
+            #     ]
+            # )
+            # self.weights_ = w0 / w0.sum() 
         
         
         
@@ -445,7 +455,7 @@ class EMNucViewer:
     
     @window_df.setter
     def window_df(self, new_df):
-        self.window_df = new_df
+        self.__window_df = new_df
     
     @property
     def stat_df(self):
@@ -453,7 +463,7 @@ class EMNucViewer:
     
     @stat_df.setter
     def stat_df(self, new_df):
-        self.stat_df = new_df
+        self.__stat_df = new_df
     
     def merge(self, new_model):
         new_viewer = EMNucViewer(self.start, self.stop, new_model)
@@ -464,8 +474,11 @@ class EMNucViewer:
         return self
     
     def drop_duplicates(self):
-        self.__window_df = self.window_df.drop_duplicates()
-        self.__stat_df = self.stat_df.drop_duplicates()
+        # window_df = self.window_df.drop_duplicates()
+        new_stat_df = self.stat_df.drop_duplicates('dyad')
+        new_viewer = EMNucViewer(self.start, self.stop)
+        new_viewer.window_df, new_viewer.stat_df = self.window_df, new_stat_df
+        return new_viewer
         
     def __make_window_df(self, model=None):
         if model is None:
@@ -503,7 +516,7 @@ class EMNucViewer:
     
         return statistics
     
-    def plot(self, nuc_template, std_template, ax=None):
+    def plot(self, nuc_template, std_template, ax=None, legend=True):
         if ax is None:
             fig, ax = plt.subplots()
         x, coverage = self.make_coverage()
@@ -512,6 +525,8 @@ class EMNucViewer:
         ax.errorbar(x, model_coverage, yerr=model_std, label='model')
         ax.plot(x, coverage, label='experiment')
         ax.bar(self.stat_df.dyad.to_numpy(), self.stat_df.height.to_numpy(), 10, label='dyads')
+        if legend:
+            ax.legend()
         return ax
 
     def make_coverage(self):
