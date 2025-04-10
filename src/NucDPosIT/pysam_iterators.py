@@ -22,6 +22,9 @@ class AbstractWindowIterator(ABC):
     @abstractmethod
     def template_generator(self):
         pass
+    
+    
+# class BedWindowIterator
             
             
 class BaseWindowIterator(AbstractWindowIterator):
