@@ -12,7 +12,7 @@ setup(
     author='DRyabov',
     author_email='example@gmail.com',
     description='This is the simplest module for quick work with files.',
-    long_description=readme(),
+    # long_description=readme(),
     long_description_content_type='text/markdown',
     url='your_url',
     packages=find_packages(),
