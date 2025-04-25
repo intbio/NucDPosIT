@@ -7,7 +7,6 @@ from sklearn.base import BaseEstimator, ClusterMixin
 import numpy as np
 import scipy as spy
 from collections import Counter
-from tqdm.auto import tqdm
 import matplotlib.pyplot as plt 
 from sklearn.utils.validation import check_is_fitted
 from functools import lru_cache
@@ -159,7 +158,7 @@ class BaseEMStrategy(CoordinateProbsMixin, AbstractEMStrategy):
     def run_strategy(self, left_cords, right_cords):
         self._init_fields(left_cords, right_cords)
         self.__crit = 1000
-        for i in tqdm(range(self.max_iter), total=self.max_iter, leave=False):
+        for i in range(self.max_iter):
             old_weights = self.weights.copy()
             self.E_step(left_cords, right_cords)
             self.M_step()
@@ -313,7 +312,7 @@ class DropingStochasticEMAlgorythm(DropingStochasticEMStrategy):
         
     def run_strategy(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
-        for i in tqdm(range(self.max_iter), total=self.max_iter, leave=False):
+        for i in range(self.max_iter):
             self.E_step(left_cords, right_cords)
             self.S_step()
             self.M_step() 
@@ -504,7 +503,7 @@ class EMNucViewer:
         window_data['stat'] = window_data.dyad - window_data.mid
         window_data['stat'] = window_data.groupby('dyad', group_keys=False).stat.apply(lambda x: x  / x.std() )
         window_data['stat'] = window_data['stat'] ** 2
-        norm1 = window_data.groupby('dyad').stat.agg(sum)
+        norm1 = window_data.groupby('dyad').stat.sum()
         norm1.name = 'stat'
         statistics = pd.merge(norm1, group_size, on='dyad').reset_index(drop=True)
         p_values = [1 - spy.stats.chi2.cdf(row.stat, row['size']) for i, row in statistics.iterrows()]
