@@ -2,7 +2,6 @@ import numpy as np
 import plotly.express as px
 import math
 
-
 # @jit
 def multinomial_rvs(n, p):
     """

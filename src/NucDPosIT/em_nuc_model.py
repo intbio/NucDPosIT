@@ -245,7 +245,7 @@ class DropingStochasticEMStrategy(StochasticEMStrategy):
         super().__init__(n_nucs=max_comp, positions0=positions0, weights0=weights0, max_iter=max_iter, temp=temp, tol=tol, fit_res=fit_res, tau=tau)
         self.alpha = alpha
         self.min_incluster = None
-        self.drop_counter = 40
+        self.drop_counter = 30
         
     def _init_fields(self, left_cords, right_cords):
         super()._init_fields(left_cords, right_cords)
