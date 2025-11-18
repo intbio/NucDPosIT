@@ -1,0 +1,249 @@
+import torch
+
+
+class EMModel:
+    def __init__(
+        self,
+        starts,
+        stops,
+        errors,
+        n_initial,
+        max_iter=500,
+        reg_coef=0,
+        tol=0.0001,
+        dyads=None,
+        weights=None,
+        device="cpu",
+    ):
+        self.device = device
+        self.starts = self.__validate_cords(starts)
+        self.stops = self.__validate_cords(stops)
+        self.errors = errors.to(device)
+        self.n_initial = n_initial
+        self.max_iter = max_iter
+        self.dyads = self.__validate_dyads(dyads)
+        self.weights = self.__validate_weights(weights)
+        self.reg_coef = reg_coef
+        self.tol = tol
+        self.probs_matrix = self.__create_probs_matrix(self.dyads)
+        self.Hij = torch.eye(*self.probs_matrix.shape, device=device)
+        self.grid_probs = self.__create_grid_probs()
+
+    @staticmethod
+    def reset(model):
+        new_model = type(model)(
+            model.starts,
+            model.stops,
+            model.errors,
+            model.ndyads,
+            model.max_iter,
+            model.reg_coef,
+            model.tol,
+            None,
+            None,
+            model.device,
+        )
+        return new_model
+
+    @property
+    def nreads(self):
+        return len(self.starts)
+
+    @property
+    def ndyads(self):
+        return len(self.weights)
+
+    def __validate_cords(self, cords):
+        return cords.to(self.device)
+
+    def __validate_dyads(self, dyads=None):
+        if dyads is None:
+            dyads = (
+                torch.linspace(
+                    self.starts.min(),
+                    self.stops.max(),
+                    self.n_initial,
+                    device=self.device,
+                )
+                .int()
+                .reshape(-1, 1)
+            )
+        return dyads
+
+    def __validate_weights(self, weights=None):
+        if weights is None:
+            weights = torch.rand(
+                self.n_initial, dtype=float, device=self.device
+            ).reshape(-1, 1)
+            weights /= weights.sum()
+        return weights
+
+    def __create_probs_matrix(self, dyads):
+        left_ones = (
+            torch.ones((self.nreads, len(dyads)), dtype=float, device=self.device)
+            * self.starts
+        ).T
+        right_ones = (
+            torch.ones((self.nreads, len(dyads)), dtype=float, device=self.device)
+            * self.stops
+        ).T
+        L_index = self.__insert_probs_to_matrix(dyads - left_ones, self.errors)
+        R_index = self.__insert_probs_to_matrix(right_ones - dyads, self.errors)
+        return (L_index * R_index).T
+
+    def __create_grid_probs(self):
+        potential_dyads = torch.arange(
+            self.starts.min(), self.stops.max(), 1, device=self.device
+        ).reshape(-1, 1)
+        probs = torch.log(self.__create_probs_matrix(potential_dyads) + 1e-50)
+        return probs
+
+    def __insert_probs_to_matrix(self, idx_matrix, errors):
+        valid_mask = (idx_matrix >= 0) & (idx_matrix < len(errors)).bool()
+        idx_matrix[valid_mask] = errors[idx_matrix[valid_mask].int()]
+        idx_matrix[~valid_mask] = 0
+        return idx_matrix
+
+    def e_step(self):
+        self.probs_matrix = self.__create_probs_matrix(self.dyads)
+        self.Hij = (self.probs_matrix * self.weights.T) / (
+            self.probs_matrix @ self.weights
+        )
+
+    def m_step(self):
+        self.dyads = (
+            self.starts.min()
+            + torch.argmax(self.grid_probs.T @ self.Hij, dim=0, keepdim=True).T
+        )
+        self.weights = self.Hij.sum(0, keepdim=True).T
+        self.weights = self.weights / self.weights.sum() - self.reg_coef
+        self.weights[self.weights < 0] = 0
+        self.weights /= self.weights.sum()
+        if (self.weights == 0).all() or self.weights.isnan().all():
+            raise ValueError("all weights = 0. It seems reg_coef is too high")
+
+    def run(self):
+        cold_iter = 10
+        prev = 0
+        losses = []
+
+        for i in range(self.max_iter):
+            prev_hij = self.Hij
+
+            self.e_step()
+            self.m_step()
+
+            if self.Hij.shape != prev_hij.shape:
+                continue
+
+            loss = (self.Hij - prev_hij).abs().sum().tolist()
+            losses.append(loss)
+
+            # if loss < self.tol:
+            #     break
+
+        # self.__delete_components()
+        return losses
+
+    def delete_components(self):
+        keep_alive_mask = (self.weights > 0).bool().reshape(-1, 1)
+        self.weights = self.weights[keep_alive_mask].reshape(-1, 1)
+        self.weights /= self.weights.sum()
+        self.dyads = self.dyads[keep_alive_mask].reshape(-1, 1)
+        self.probs_matrix = self.__create_probs_matrix(self.dyads)
+
+    def to(self, device):
+        """Move model to specified device"""
+        self.device = device
+        self.starts = self.starts.to(device)
+        self.stops = self.stops.to(device)
+        self.errors = self.errors.to(device)
+        self.dyads = self.dyads.to(device)
+        self.weights = self.weights.to(device)
+        if self.probs_matrix is not None:
+            self.probs_matrix = self.probs_matrix.to(device)
+        if self.Hij is not None:
+            self.Hij = self.Hij.to(device)
+
+    def get_params(self):
+        params = {
+            "L": self.starts,
+            "R": self.stops,
+            "errors": self.errors,
+            "n_initial": self.n_initial,
+            "max_iter": self.max_iter,
+            "reg_coef": self.reg_coef,
+            "tol": self.tol,
+            "dyads": self.dyads,
+            "weights": self.weights,
+            "device": self.device,
+        }
+        return params
+
+
+class StochasticEMMOdel(EMModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def m_step(self):
+        stochastic_res = self.__sample_multinomial_vectorized_torch()
+        self.dyads = (
+            self.starts.min()
+            + torch.argmax(self.grid_probs.T @ stochastic_res, dim=0, keepdim=True).T
+        )
+        self.weights = (
+            stochastic_res.sum(0, keepdim=True).T / self.ndyads - self.reg_coef
+        )
+        self.weights[self.weights < 0] = 0
+        self.weights /= self.weights.sum()
+        if (self.weights == 0).all():
+            raise ValueError("all weights = 0. It seems reg_coef is too high")
+
+    def __sample_multinomial_vectorized_torch(self):
+        samples = torch.multinomial(self.Hij, num_samples=1).squeeze(-1)
+        n_classes = self.Hij.shape[-1]
+        stochastic_res = torch.nn.functional.one_hot(
+            samples, num_classes=n_classes
+        ).float()
+        return stochastic_res.double()
+
+    def run(self):
+        cold_iter = 30
+        smoothed_change = 0
+        alpha = 0.3  # коэффициент сглаживания
+        history = []
+        convergence_count = 0
+
+        for i in range(self.max_iter):
+            prev_hij = self.Hij
+
+            if i < cold_iter:
+                super().e_step()
+                super().m_step()
+
+            else:
+                self.e_step()
+                self.m_step()
+                self.delete_components()
+
+            if self.Hij.shape != prev_hij.shape:
+                continue
+
+            # Вычисляем изменение
+            current_change = (self.Hij - prev_hij).abs().mean().item()
+
+            # Экспоненциальное сглаживание
+            smoothed_change = alpha * current_change + (1 - alpha) * smoothed_change
+            history.append(smoothed_change)
+
+            # Условия сходимости
+            if i > cold_iter and smoothed_change < self.tol:
+                # Дополнительная проверка: стабильность в течение нескольких итераций
+                convergence_count += 1
+
+                if convergence_count >= 5:
+                    break
+            else:
+                convergence_count = 0
+
+        return history
