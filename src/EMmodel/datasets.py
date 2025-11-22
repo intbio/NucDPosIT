@@ -58,9 +58,16 @@ class BamFileIterator:
     def __iter__(self):
         self.start = self.initial_start
         self.stop = self.start + self.window_size
+        self.stop_iter = False
         return self
 
     def __next__(self):
+        if self.stop_iter == True:
+            raise StopIteration
+        
+        if self.stop >= self.chromo_len:
+            self.stop_iter = True
+        
         records = list(self.al_file.fetch(self.chromosome, self.start, self.stop))
         paired_records = self._collect_paired_reads(records)
         items = {
@@ -68,13 +75,9 @@ class BamFileIterator:
             "end": torch.tensor(list(map(lambda x: x[1].reference_end, paired_records))).view(-1, 1),
             "id": list(map(lambda x: x[0].qname, paired_records)),
         }
-        if self.stop <= self.chromo_len:
-            self.start += self.step
-            self.stop = self.start + self.window_size
-            return items
-        else:
-            return items
-            raise StopIteration
+        self.start += self.step
+        self.stop = self.start + self.window_size
+        return items
 
     def _collect_paired_reads(self, records):
         read_pairs = defaultdict(dict)
@@ -89,6 +92,6 @@ class BamFileIterator:
 
         # Отбираем только полные пары
         for name, pair in read_pairs.items():
-            if "R1" in pair and "R2" in pair:
+            if "R1" in pair and "R2" in pair and pair['R2'].reference_end - pair['R1'].reference_start < 195:
                 valid_pairs.append((pair["R1"], pair["R2"]))
         return valid_pairs

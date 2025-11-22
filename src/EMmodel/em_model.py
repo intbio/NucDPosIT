@@ -7,7 +7,7 @@ class EMModel:
         starts,
         stops,
         errors,
-        n_initial,
+        dyad_dist,
         max_iter=500,
         reg_coef=0,
         tol=0.0001,
@@ -19,7 +19,7 @@ class EMModel:
         self.starts = self.__validate_cords(starts)
         self.stops = self.__validate_cords(stops)
         self.errors = errors.to(device)
-        self.n_initial = n_initial
+        self.dyad_dist = dyad_dist
         self.max_iter = max_iter
         self.dyads = self.__validate_dyads(dyads)
         self.weights = self.__validate_weights(weights)
@@ -51,7 +51,7 @@ class EMModel:
 
     @property
     def ndyads(self):
-        return len(self.weights)
+        return len(self.dyads)
 
     def __validate_cords(self, cords):
         return cords.to(self.device)
@@ -59,10 +59,10 @@ class EMModel:
     def __validate_dyads(self, dyads=None):
         if dyads is None:
             dyads = (
-                torch.linspace(
+                torch.arange(
                     self.starts.min(),
-                    self.stops.max(),
-                    self.n_initial,
+                    self.stops.max() + 1,
+                    self.dyad_dist,
                     device=self.device,
                 )
                 .int()
@@ -73,7 +73,7 @@ class EMModel:
     def __validate_weights(self, weights=None):
         if weights is None:
             weights = torch.rand(
-                self.n_initial, dtype=float, device=self.device
+                self.ndyads, dtype=float, device=self.device
             ).reshape(-1, 1)
             weights /= weights.sum()
         return weights
@@ -93,13 +93,13 @@ class EMModel:
 
     def __create_grid_probs(self):
         potential_dyads = torch.arange(
-            self.starts.min(), self.stops.max(), 1, device=self.device
+            self.starts.min(), self.stops.max() + 1, 1, device=self.device
         ).reshape(-1, 1)
         probs = torch.log(self.__create_probs_matrix(potential_dyads) + 1e-50)
         return probs
 
     def __insert_probs_to_matrix(self, idx_matrix, errors):
-        valid_mask = (idx_matrix >= 0) & (idx_matrix < len(errors)).bool()
+        valid_mask = ((idx_matrix >= 0) & (idx_matrix < len(errors))).bool()
         idx_matrix[valid_mask] = errors[idx_matrix[valid_mask].int()]
         idx_matrix[~valid_mask] = 0
         return idx_matrix
@@ -170,7 +170,7 @@ class EMModel:
             "L": self.starts,
             "R": self.stops,
             "errors": self.errors,
-            "n_initial": self.n_initial,
+            "dyad_dist": self.dyad_dist,
             "max_iter": self.max_iter,
             "reg_coef": self.reg_coef,
             "tol": self.tol,
@@ -191,15 +191,18 @@ class StochasticEMMOdel(EMModel):
             self.starts.min()
             + torch.argmax(self.grid_probs.T @ stochastic_res, dim=0, keepdim=True).T
         )
-        self.weights = (
-            stochastic_res.sum(0, keepdim=True).T / self.ndyads - self.reg_coef
-        )
+        
+        self.weights = stochastic_res.sum(0, keepdim=True).T  # Сумма по reads для каждого дайда
+        self.weights = self.weights / self.weights.sum() - self.reg_coef
+        
         self.weights[self.weights < 0] = 0
         self.weights /= self.weights.sum()
         if (self.weights == 0).all():
             raise ValueError("all weights = 0. It seems reg_coef is too high")
 
     def __sample_multinomial_vectorized_torch(self):
+        if self.Hij.isnan().any():
+            raise ValueError("Hij matrix contains nan")
         samples = torch.multinomial(self.Hij, num_samples=1).squeeze(-1)
         n_classes = self.Hij.shape[-1]
         stochastic_res = torch.nn.functional.one_hot(
@@ -208,7 +211,7 @@ class StochasticEMMOdel(EMModel):
         return stochastic_res.double()
 
     def run(self):
-        cold_iter = 30
+        cold_iter = 10
         smoothed_change = 0
         alpha = 0.3  # коэффициент сглаживания
         history = []
@@ -222,9 +225,9 @@ class StochasticEMMOdel(EMModel):
                 super().m_step()
 
             else:
+                self.delete_components()
                 self.e_step()
                 self.m_step()
-                self.delete_components()
 
             if self.Hij.shape != prev_hij.shape:
                 continue

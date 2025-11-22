@@ -2,40 +2,38 @@ import copy
 import pandas as pd
 
 
-def optimize_reg_coef(model, max_iter=30, max_successful_runs=5):
-    best_model = copy.deepcopy(model)
+def optimize_reg_coef(model_class, starts, stops, errors, params, max_iter=50, max_successful_runs=5):
+    
+    best_model = None
     low, high = 0, 1
-    best_nonzero = (best_model.weights > 0).sum().item()
     successful_runs = 0
     
-    for i in range(max_iter):
+    for i in range(0, max_iter):
         mid = (low + high) / 2
-        
-        new_model = copy.deepcopy(model)
+        new_model = model_class(starts, stops, errors, **params)
         new_model.reg_coef = mid
         
         try:
             new_model.run()
-            successful_runs += 1
-            current_nonzero = (new_model.weights > 0).sum().item()
             
-            print(f"Iter {i}: reg_coef={mid:.4f}, components={current_nonzero}")
-            
-            if current_nonzero > 0:
-                if current_nonzero < best_nonzero:
-                    best_model = copy.deepcopy(new_model)
-                    best_nonzero = (best_model.weights > 0).sum().item()
-
-                        
-                low = mid
-            else:
-                high = mid
-            
-            if successful_runs >= max_successful_runs:
-                break
-                
         except Exception as error:
             high = mid
+            
+        else:
+            if (new_model.weights == 0).all():
+                continue
+                
+            low = mid           
+            successful_runs += 1
+            
+            if best_model is None or (new_model.weights != 0).sum().item() < (best_model.weights != 0).sum().item():
+                best_model = copy.deepcopy(new_model)
+        
+        if successful_runs >= max_successful_runs:
+            break
+            
+    if best_model is None:
+        raise ValueError("model divergence", (stops - starts).max())
     
     return best_model
 

@@ -1,4 +1,4 @@
-from nucleosomes import Nucleosome
+# from nucleosomes import Nucleosome
 from sklearn.base import BaseEstimator 
 from sklearn.utils.validation import check_is_fitted
 import numpy as np
@@ -49,10 +49,10 @@ class ExoModel(BaseEstimator):
     def digest(self, size):
         return np.random.choice(np.arange(*self.opt_scope), size=size, p=self.optimization_.x).astype(int)
     
-    def digest_nucs(self, size, dyad=0, id_='nuc'):
-        nucleosomes = [0] * size
-        starts, ends = self.digest(size), self.digest(size)
-        for i in range(len(nucleosomes)):
-            cur_start, cur_end = starts[i], ends[i]
-            nucleosomes[i] = Nucleosome(dyad, cur_start, cur_end, id_)
-        return nucleosomes
+    # def digest_nucs(self, size, dyad=0, id_='nuc'):
+    #     nucleosomes = [0] * size
+    #     starts, ends = self.digest(size), self.digest(size)
+    #     for i in range(len(nucleosomes)):
+    #         cur_start, cur_end = starts[i], ends[i]
+    #         nucleosomes[i] = Nucleosome(dyad, cur_start, cur_end, id_)
+    #     return nucleosomes
