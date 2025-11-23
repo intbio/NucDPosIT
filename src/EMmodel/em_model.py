@@ -1,4 +1,5 @@
 import torch
+import copy
 
 
 class EMModel:
@@ -250,3 +251,97 @@ class StochasticEMMOdel(EMModel):
                 convergence_count = 0
 
         return history
+    
+    
+class ModelOptimizer:
+    def __init__(
+        self,
+        model_class,
+        errors,
+        dyad_dist,
+        max_model_iter=500,
+        max_iter=20,
+        max_successful_runs=3,
+        nretries=5,
+        device="cpu",
+    ):
+        self.model_class = model_class
+        self.errors = errors
+        self.device = device
+
+        self.dyad_dist = dyad_dist
+        self.max_iter = max_iter
+        self.max_model_iter = max_model_iter
+        self.max_successful_runs = max_successful_runs
+        self.nretries = nretries
+
+    def optimize_reg_coef(self, starts, stops, dyad_dist):
+        successful_runs = 0
+        low = 0
+        high = 1
+        best_model = None
+
+        for i in range(self.max_iter):
+            mid = (low + high) / 2
+            new_model = self.model_class(
+                starts,
+                stops,
+                self.errors,
+                reg_coef=mid,
+                dyad_dist=dyad_dist,
+                max_iter=self.max_model_iter,
+                device=self.device,
+            )
+
+            try:
+                new_model.run()
+
+            except Exception as error:
+                high = mid
+
+            else:
+                low = mid
+                successful_runs += 1
+
+                if (
+                    best_model is None
+                    or (new_model.weights != 0).sum().item()
+                    < (best_model.weights != 0).sum().item()
+                ):
+                    best_model = copy.deepcopy(new_model)
+
+            if successful_runs >= self.max_successful_runs:
+                break
+
+        if best_model is None:
+            raise ValueError("best model is None")
+        return best_model
+
+    def fit_data(self, starts, stops):
+        success = False
+        best_model = None
+
+        try:
+            best_model = self.optimize_reg_coef(starts, stops)
+
+        except Exception as e:
+            for i in range(self.nretries):
+                new_dyad_dist = self.dyad_dist // 2 ** (i + 1)
+                if new_dyad_dist == 0:
+                    new_dyad_dist = 1
+
+                try:
+                    best_model = self.optimize_reg_coef(
+                        starts, stops, new_dyad_dist
+                    )
+                    success = True
+                    print(f"Success on retry {i+1} with dyad_dist={new_dyad_dist}")
+                    break
+
+                except Exception as retry_error:
+                    print(f"Retry {i+1} failed: {retry_error}")
+                    continue
+
+        if not success or best_model is None:
+            raise ValueError("empty model")
+        return best_model
