@@ -260,7 +260,7 @@ class ModelOptimizer:
         errors,
         dyad_dist,
         max_model_iter=500,
-        max_iter=20,
+        max_train_iter=20,
         max_successful_runs=3,
         nretries=5,
         device="cpu",
@@ -270,18 +270,18 @@ class ModelOptimizer:
         self.device = device
 
         self.dyad_dist = dyad_dist
-        self.max_iter = max_iter
         self.max_model_iter = max_model_iter
+        self.max_train_iter = max_train_iter
         self.max_successful_runs = max_successful_runs
         self.nretries = nretries
 
     def optimize_reg_coef(self, starts, stops, dyad_dist):
         successful_runs = 0
         low = 0
-        high = 1
+        high = 0.001
         best_model = None
 
-        for i in range(self.max_iter):
+        for i in range(self.max_train_iter):
             mid = (low + high) / 2
             new_model = self.model_class(
                 starts,
@@ -322,7 +322,8 @@ class ModelOptimizer:
         best_model = None
 
         try:
-            best_model = self.optimize_reg_coef(starts, stops)
+            best_model = self.optimize_reg_coef(starts, stops, self.dyad_dist)
+            success = True
 
         except Exception as e:
             for i in range(self.nretries):
@@ -335,11 +336,11 @@ class ModelOptimizer:
                         starts, stops, new_dyad_dist
                     )
                     success = True
-                    print(f"Success on retry {i+1} with dyad_dist={new_dyad_dist}")
+                    # print(f"Success on retry {i+1} with dyad_dist={new_dyad_dist}")
                     break
 
                 except Exception as retry_error:
-                    print(f"Retry {i+1} failed: {retry_error}")
+                    # print(f"Retry {i+1} failed: {retry_error}")
                     continue
 
         if not success or best_model is None:

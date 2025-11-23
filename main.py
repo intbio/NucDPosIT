@@ -7,7 +7,7 @@ import pysam
 import numpy as np
 import torch
 from multiprocessing import Pool, Lock
-import uuid
+import logging
 
 from src.EMmodel.em_model import StochasticEMMOdel, ModelOptimizer
 from src.EMmodel.datasets import BamFileIterator
@@ -15,6 +15,15 @@ from src.functools import make_df
 
 
 lock = Lock()
+
+
+def setup_logger(log_path):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(processName)s - %(message)s',
+        filename=log_path,
+        filemode="w"
+    )
 
 
 def check_path(path, force=False):
@@ -33,13 +42,13 @@ def worker_foo(bam_input,
                chunk_start, 
                chunk_stop,
                step, 
-               device, 
                errors, 
                dyad_dist, 
-               train_iter, 
-               max_iter, 
-               max_successful_trains,
+               max_model_iter, 
+               max_train_iter,
+               max_successful_runs,
                nretries,
+               device,
                df_path, 
                dyads_df_path):
     
@@ -54,21 +63,23 @@ def worker_foo(bam_input,
     optimizer = ModelOptimizer(StochasticEMMOdel, 
                                      errors,
                                      dyad_dist,
-                                     train_iter,
-                                     max_iter,
-                                     max_successful_trains,
-                                     nretries)    
+                                     max_model_iter,
+                                     max_train_iter,
+                                     max_successful_runs,
+                                     nretries,
+                                     device)    
     
     for idx, batch in enumerate(bam_iterator):
         starts, ends = batch["start"], batch["end"]
         
         try:
             best_model = optimizer.fit_data(starts, ends)
+            # logging.info(f"processed idx {idx} for window {starts.min()} : {ends.max()}")
         except Exception as fit_error:
-            print(f"ERROR {fit_error} on chromosome {bam_iterator.chromosome} for window {starts.min()} : {ends.max()}. SKIP")
+            (f"ERROR {fit_error} on chromosome {bam_iterator.chromosome} for window {starts.min()} : {ends.max()}. SKIP")
             continue
-        else:
-            print(f"processed idx {idx} for window {starts.min()} : {ends.max()}")
+        
+            
             
         try:
             best_model.to('cpu')
@@ -99,7 +110,7 @@ def worker_foo(bam_input,
                     )
 
         except Exception as processing_error:
-            print(f"ERROR {processing_error} on chromosome {bam_iterator.chromosome} for window {starts.min()} : {ends.max()}. SKIP")
+            # print(f"ERROR {processing_error} on chromosome {bam_iterator.chromosome} for window {starts.min()} : {ends.max()}. SKIP")
             continue
 
 
@@ -119,26 +130,25 @@ def main():
     parser.add_argument("-d", '--device', default='cpu', help='Device to use (cpu/cuda)')
     parser.add_argument('-ddist', '--dyad_dist', default=10, type=int, help='Dyad distance')
     parser.add_argument("-nretries", default=5, type=int, help='Number of retries')
-    parser.add_argument('-max_iter', "--max_iter", default=500, type=int, help='Maximum iterations')
+    parser.add_argument('-max_iter', "--max_iter", default=700, type=int, help='Maximum iterations')
     parser.add_argument("-exclude", '--exclude_chromosomes', default=None, nargs='+', help='Chromosomes to exclude')
     parser.add_argument('-include', '--include_chromosomes', default=None, nargs='+', help='Chromosomes to include')
-    parser.add_argument('-ti', '--train_iter', default=30, type=int, help='Training iterations')
+    parser.add_argument('-ti', '--train_iter', default=50, type=int, help='Training iterations')
     parser.add_argument('-ntrain', '--max_successful_trains', default=3, type=int, help='Max successful trains')
     parser.add_argument('-f', '--force', action='store_true', help='Overwrite existing files')
     parser.add_argument('-njobs', help='number of processes', type=int, default=1)
 
     args = parser.parse_args()
-    
-    # Create output directory if it doesn't exist
-    if not os.path.exists(args.output):
-        os.makedirs(args.output, exist_ok=True)
-    
+            
     df_path = os.path.join(args.output, 'templates.csv')
     dyads_df_path = os.path.join(args.output, 'dyads.bed')
+    log_path = os.path.join(args.output, 'log.txt')
     
     # Check and prepare output files
     check_path(df_path, args.force)
     check_path(dyads_df_path, args.force)
+    check_path(log_path, args.force)
+    setup_logger(log_path)
     
     # Load errors
     if not os.path.exists(args.errors):
@@ -178,13 +188,13 @@ def main():
                     chunk_start,
                     chunk_stop,
                     args.step,
-                    args.device, 
                     errors, 
                     args.dyad_dist, 
-                    args.train_iter, 
-                    args.max_iter, 
+                    args.max_iter,
+                    args.train_iter,  
                     args.max_successful_trains,
                     args.nretries,
+                    args.device,
                     df_path, 
                     dyads_df_path)
             )
