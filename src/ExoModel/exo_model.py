@@ -7,10 +7,9 @@ import scipy as spy
 
 
 class ExoModel(BaseEstimator):
-    def __init__(self, l0=147, reg_koef = 0.18, max_iter=2000):
+    def __init__(self, reg_koef = 0.18, max_iter=2000):
         self.max_iter = max_iter
         self.__reg_koef = reg_koef
-        self.l0 = l0
         
     @property
     def reg_koef(self):

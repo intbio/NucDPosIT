@@ -212,7 +212,7 @@ class StochasticEMMOdel(EMModel):
         return stochastic_res.double()
 
     def run(self):
-        cold_iter = 10
+        cold_iter = 0
         smoothed_change = 0
         alpha = 0.3  # коэффициент сглаживания
         history = []
@@ -278,7 +278,7 @@ class ModelOptimizer:
     def optimize_reg_coef(self, starts, stops, dyad_dist):
         successful_runs = 0
         low = 0
-        high = 0.001
+        high = 1
         best_model = None
 
         for i in range(self.max_train_iter):
@@ -324,25 +324,25 @@ class ModelOptimizer:
         try:
             best_model = self.optimize_reg_coef(starts, stops, self.dyad_dist)
             success = True
+            print(f"Success with dyad_dist={self.dyad_dist}")
+            return best_model
 
         except Exception as e:
             for i in range(self.nretries):
                 new_dyad_dist = self.dyad_dist // 2 ** (i + 1)
                 if new_dyad_dist == 0:
-                    new_dyad_dist = 1
+                    new_dyad_dist = 1            
 
                 try:
                     best_model = self.optimize_reg_coef(
                         starts, stops, new_dyad_dist
                     )
                     success = True
-                    # print(f"Success on retry {i+1} with dyad_dist={new_dyad_dist}")
-                    break
+                    print(f"Success on retry {i+1} with dyad_dist={new_dyad_dist}")
+                    return best_model
 
                 except Exception as retry_error:
-                    # print(f"Retry {i+1} failed: {retry_error}")
+                    print(f"Retry {i+1} failed: {retry_error}")
                     continue
 
-        if not success or best_model is None:
-            raise ValueError("empty model")
-        return best_model
+        raise ValueError("empty model")
