@@ -93,6 +93,7 @@ if __name__ == '__main__':
     
     
     tlens, all_counts = calculate_template_length_distribution(bam_path)     
+    print(tlens, all_counts)
     # lengths = np.arange(args.av_length - 60, args.av_length + 61)
     hist = [tlens[i] / all_counts for i in range(0, 299)]
     
@@ -122,12 +123,7 @@ if __name__ == '__main__':
     plt.legend(loc='upper left')
     plt.savefig(f"{out_path}/{basename}_errors/{basename}_density.png")
    
-            
 
-    
-
-    
-    # pd.DataFrame(counts, index=lengths, columns=[os.path.basename(args.bam_input)]).to_csv('hist.csv', index=False)
 
     
     

@@ -41,7 +41,6 @@ def sigterm_handler(signum, frame, df_path, dyads_df_path):
     sys.exit(0)
 
 
-
 def setup_logger(log_path):
     logging.basicConfig(
         level=logging.INFO,
@@ -61,26 +60,6 @@ def check_path(path, force=False):
             open(path, 'w').close()
             
             
-# def df_writer(df_path, dyads_df_path):
-#     global shared_queue
-    
-#     try:
-    
-#         while True:
-#             if shared_queue.empty():
-#                 continue
-#             else:
-
-#                 df, dyads_bed = shared_queue.get()
-#                 df.to_csv(df_path, index=False, header=False, mode='a')
-#                 dyads_bed[['chr', 'start', 'stop', 'score']].to_csv(
-#                     dyads_df_path, index=False, header=False, sep='\t', mode='a'
-#                 )
-#     except Exception as writer_error:
-#         print(f"ERROR: {writer_error}, reloading...")
-#         return df_writer(df_path, dyads_df_path)
-            
-            
 def worker_foo(bam_input, 
                chromosome, 
                window_size, 
@@ -96,15 +75,6 @@ def worker_foo(bam_input,
                device,
                df_path, 
                dyads_df_path):
-    
-    # uid = uuid.uuid4()
-    # # Добавляем точку как разделитель
-    # temp_df_path = f"{df_path}.{uid}.dftmp"
-    # temp_dyads_path = f"{dyads_df_path}.{uid}.dyadtmp"
-    
-    # Создаем пустые временные файлы
-    # open(temp_df_path, 'w').close()
-    # open(temp_dyads_path, 'w').close()
     
     print(f"Worker started: {df_path}, {dyads_df_path}")  # Отладка
     
@@ -123,7 +93,7 @@ def worker_foo(bam_input,
                                max_train_iter,
                                max_successful_runs,
                                nretries,
-                               device)    
+                               device)  
     
     for idx, batch in enumerate(bam_iterator):
         starts, ends = batch["start"], batch["end"]
@@ -159,8 +129,6 @@ def worker_foo(bam_input,
             dyads_bed['id'] = idx
             dyads_bed.rename(columns={'dyads': 'start', 'size': 'score'}, inplace=True)
 
-     
-            
             with lock:
                 df.to_csv(df_path, index=False, header=False, mode='a')
                 dyads_bed[['chr', 'start', 'stop', 'id', 'score']].to_csv(
@@ -174,9 +142,54 @@ def worker_foo(bam_input,
     print(f"Worker finished: {df_path}")  # Отладка
 
             
-            
+class FileProcessor:
+    def __init__(self, bam_path, outdir, errors_path, force):
+        self.bam_path = self.validate_inpath(bam_path)
+        self.outdir = self.validate_outpath(outdir, force)
+        self.errors_path = self.validate_errors(errors_path)
+        # self.win_size = win_size
+        # self.step = step
+        # self.device = device
+        # self.dyad_dist = dyad_dist
+        # self.
+        
+    def validate_inpath(self, inpath: str):
+        if not os.path.exists(inpath):
+            raise ValueError(f"file {inpath} does not exist")
+        if not os.path.isfile(inpath):
+            raise ValueError(f"file {inpath} is not a file")
+        samfile = pysam.AlignmentFile(inpath, 'rb')
+        if not samfile.has_index():
+            raise ValueError(f"file {inpath} has not index")
+        return inpath
+        
+    def validate_outpath(self, outdir: str, force, outfile_name='templates.csv', out_dyads='dyads.bed'):
+        if not os.path.exists(outdir):
+            os.system(f"mkdir {outdir}")
+        elif force:
+            os.system(f"rm -r {outdir}/*")
+        else:
+            raise ValueError(f"{outdir} exists. Add -f to overwrite")
+        if not os.path.isdir(outdir):
+            raise ValueError(f"path {outpath} is not a directory")
+        self.outfile = os.path.join(outdir, outfile_name)
+        self.out_dyads = os.path.join(outdir, out_dyads)
+        return outdir
+    
+    def validate_errors(self, errors_path: str):
+        if not os.path.exists(errors_path):
+            raise ValueError(f"file {errors_path} does not exist")
+        self.errors = torch.tensor(np.loadtxt(errors_path))
+        return errors_path
+        
+        
+        
+        
+
             
 def main():
+    signal.signal(signal.SIGTERM, lambda x, y: sigterm_handler(x, y, df_path, dyads_df_path))
+    
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
 
     parser = argparse.ArgumentParser(
@@ -199,35 +212,12 @@ def main():
     parser.add_argument('-ntrain', '--max_successful_trains', default=1, type=int, help='Max successful trains')
     parser.add_argument('-f', '--force', action='store_true', help='Overwrite existing files')
     parser.add_argument('-njobs', help='number of processes', type=int, default=1)
-
+    
     args = parser.parse_args()
+    file_processor = FileProcessor(args.input, args.output, args.errors, args.force)
     
-    if not os.path.exists(args.output):
-        os.system(f"mkdir {args.output}")
-            
-    df_path = os.path.join(args.output, 'templates.csv')
-    dyads_df_path = os.path.join(args.output, 'dyads.bed')
-    signal.signal(signal.SIGTERM, lambda x, y: sigterm_handler(x, y, df_path, dyads_df_path))
     
-    log_path = os.path.join(args.output, 'log.txt')
-    
-    # Check and prepare output files
-    check_path(df_path, args.force)
-    check_path(dyads_df_path, args.force)
-    # check_path(log_path, args.force)
-    # setup_logger(log_path)
-    
-    # Load errors
-    if not os.path.exists(args.errors):
-        raise ValueError(f"Errors file {args.errors} does not exist")
-    errors = torch.from_numpy(np.loadtxt(args.errors))
-    
-    # Open BAM file
-    try:
-        BAM_FILE = pysam.AlignmentFile(args.input)
-    except Exception as e:
-        raise ValueError(f"Could not open BAM file {args.input}: {e}")
-    
+    BAM_FILE = pysam.AlignmentFile(file_processor.bam_path)
     # Determine chromosomes to process
     if args.include_chromosomes:
         chromosomes = args.include_chromosomes
@@ -239,9 +229,7 @@ def main():
     
     # Process each chromosome
     chromosome_lengths = dict(zip(BAM_FILE.references, BAM_FILE.lengths))
-    
-    # process_writer = Process(target=df_writer, args=(df_path, dyads_df_path))
-    # process_writer.start()
+    BAM_FILE.close()
     
     for chromosome in chromosomes:
         print(f"Processing chromosome: {chromosome}")
@@ -251,66 +239,29 @@ def main():
         worker_arguments = []
         for i in range(len(chunk_starts) - 1):
             chunk_start, chunk_stop = chunk_starts[i], chunk_starts[i + 1]
-            
-            worker_arguments.append(
-                (   args.input, 
+            arg_copy = (file_processor.bam_path, 
                     chromosome,
                     args.window_size,
-                    chunk_start,
-                    chunk_stop,
+                    chunk_start.item(),
+                    chunk_stop.item(),
                     args.step,
-                    errors, 
+                    file_processor.errors, 
                     args.dyad_dist, 
                     args.max_iter,
                     args.train_iter,  
                     args.max_successful_trains,
                     args.nretries,
                     args.device,
-                    df_path, 
-                    dyads_df_path)
-            )
-
-        
+                    file_processor.outfile, 
+                    file_processor.out_dyads)
+            worker_arguments.append(arg_copy)
+            
         with Pool(processes=args.njobs) as p:
             p.starmap(worker_foo, worker_arguments)
             time.sleep(1)
 
-#         # Объединяем только существующие файлы
-#         dftmp_files = glob.glob(f"{df_path}.*.dftmp")
-#         dyadtmp_files = glob.glob(f"{dyads_df_path}.*.dyadtmp")
-
-#         print(f"Found {len(dftmp_files)} temporary df files")
-#         print(f"Found {len(dyadtmp_files)} temporary dyads files")
-
-#         # Создаем основные файлы если не существуют
-#         if not os.path.exists(df_path):
-#             open(df_path, 'w').close()
-#         if not os.path.exists(dyads_df_path):
-#             open(dyads_df_path, 'w').close()
-
-#         # Объединяем временные файлы
-#         for temp_file in dftmp_files:
-#             if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
-#                 try:
-#                     os.system(f"cat '{temp_file}' >> '{df_path}'")
-#                     os.system(f"rm '{temp_file}'")
-#                     print(f"Merged: {temp_file}")
-#                 except Exception as e:
-#                     print(f"Error merging {temp_file}: {e}")
-
-#         for temp_file in dyadtmp_files:
-#             if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
-#                 try:
-#                     os.system(f"cat '{temp_file}' >> '{dyads_df_path}'")
-#                     os.system(f"rm '{temp_file}'")
-#                     print(f"Merged: {temp_file}")
-#                 except Exception as e:
-#                     print(f"Error merging {temp_file}: {e}")
-
-            # process_writer.terminate()
-            # process_writer.join()
-        BAM_FILE.close()
-        print("Processing completed!")
+    # BAM_FILE.close()
+    print("Processing completed!")
 
 
 if __name__ == '__main__':
