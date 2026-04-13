@@ -1,5 +1,7 @@
 import copy
 import torch
+import pandas as pd
+import numpy as np
 
 
 class EMModel:
@@ -14,7 +16,7 @@ class EMModel:
         alpha=0.5,
     ):
         self.device = device
-        self.errors = errors.to(device)
+        self.errors = self._read_errors(errors)
         self.dyad_dist = dyad_dist
         self.max_iter = max_iter
         self.reg_coef = reg_coef
@@ -28,6 +30,19 @@ class EMModel:
     @property
     def ndyads(self):
         return len(self.dyads)
+
+    def _read_errors(self, path):
+        if isinstance(path, str):
+            errors = np.loadtxt(path, delimiter=",")
+            errors = torch.from_numpy(errors).to(self.device)
+        elif isinstance(path, np.ndarray):
+            errors = torch.from_numpy(errors).to(self.device)
+        elif isinstance(path, torch.Tensor):
+            errors = path
+        else:
+            raise TypeError(f'cannot read path {path}')
+        errors /= errors.sum()
+        return errors
 
     def __validate_cords(self, cords):
         return cords.to(self.device)
@@ -57,12 +72,11 @@ class EMModel:
     def __create_probs_matrix(self, dyads):
         n_dyads = dyads.shape[0]
         n_reads = self.nreads
-        left_diff = dyads - self.starts.view(1, -1)  # [n, nreads]
-        right_diff = self.stops.view(1, -1) - dyads  # [n, nreads]
+        left_diff = dyads - self.starts.view(1, -1) 
+        right_diff = self.stops.view(1, -1) - dyads 
 
         L_index = self.__insert_probs_to_matrix(left_diff, self.errors)
         R_index = self.__insert_probs_to_matrix(right_diff, self.errors)
-
         return (L_index * R_index).T
 
     def __create_grid_probs(self):
@@ -70,7 +84,7 @@ class EMModel:
             self.starts.min(), self.stops.max() + 1, device=self.device
         ).reshape(
             -1, 1
-        )  # [grid_size, 1]
+        ) 
 
         probs = torch.log(self.__create_probs_matrix(potential_dyads) + 1e-50)
         return probs
@@ -81,6 +95,7 @@ class EMModel:
         result = torch.zeros_like(idx_matrix, dtype=float) + 1e-50
         valid_indices = idx[valid_mask]
         result[valid_mask] = errors[valid_indices]
+
         return result
 
     def e_step(self):
@@ -139,7 +154,10 @@ class EMModel:
         return params
 
     def logLH(self):
-        lh = torch.log((self.probs_matrix * self.weights.T).sum(axis=0)).sum()
+        lh = (
+            torch.log((self.probs_matrix * self.weights.T).sum(axis=0)).sum()
+            - self.reg_coef * torch.log(self.weights).sum()
+        )
         return lh
 
     def fit(self, starts, stops, dyads=None, weights=None):
@@ -151,19 +169,24 @@ class EMModel:
         self.weights = self.__validate_weights(weights)
         self.e_step()
 
+        nweights = []
+
         prev_lh = -100000
         prev_sliding_mean = -100000
         lh_loss = []
         sliding_mean_list = []
+        self.df_list = []
 
         for i in range(self.max_iter):
             self.e_step()
+            self.df_list.append(self.to_df())
             self.m_step()
             self.delete_components()
 
+            nweights.append(len(self.weights))
+
             cur_lh = self.logLH()
             lh_loss.append(cur_lh.item())
-
             if i == 0:
                 sliding_mean = cur_lh  
             else:
@@ -172,16 +195,21 @@ class EMModel:
                 )
 
             sliding_mean_list.append(sliding_mean.item())
-
             prev_lh = cur_lh
             delta_sliding_mean = sliding_mean - prev_sliding_mean
             prev_sliding_mean = sliding_mean
 
             if delta_sliding_mean < self.tol:
                 self.e_step()
-                return lh_loss, sliding_mean_list, True
+                return {"lhloss": lh_loss, "sliding_mean": sliding_mean_list, 'success': True, "nweights": nweights}
         self.e_step()
-        return lh_loss, sliding_mean_list, False
+        return {"lhloss": lh_loss, "sliding_mean": sliding_mean_list, 'success': False, "nweights": nweights}
+
+    def to_df(self):
+        df = pd.DataFrame({"start": self.starts.flatten().cpu(), "stop": self.stops.flatten().cpu()})
+        df["dyads"] = self.dyads[self.Hij.argmax(1)].cpu()
+        df["template|dyad"] = self.Hij.max(1)[0].cpu()
+        return df
 
 
 class StochasticEMMOdel(EMModel):
@@ -207,9 +235,7 @@ class StochasticEMMOdel(EMModel):
     def __sample_multinomial_vectorized_torch(self):
         if torch.isnan(self.Hij).any():
             raise ValueError("Hij matrix contains nan")
-
         samples = torch.multinomial(self.Hij, num_samples=1).squeeze(-1)
-
         n_classes = self.Hij.shape[-1]
         stochastic_res = torch.zeros(
             (samples.shape[0], n_classes), device=self.device, dtype=torch.double
