@@ -1,0 +1,14 @@
+[project]
+name = "nucdposit"
+version = "0.0.1"
+authors = [
+  { name="D.Ryabov", email="d.ryabov@intbio.org" },
+  {name="G.Armeev"}
+]
+description = "package for detecting nucleosomes in BAM-files"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
