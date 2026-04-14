@@ -2,9 +2,11 @@ import sys, os
 import argparse
 import matplotlib.pyplot as plt
 from pathlib import Path
+import signal
 
 
 from ExoModel import exo_model
+from script_tools import signal_handler
 
 
 def parse_arguments():
@@ -58,11 +60,21 @@ def parse_arguments():
         type=int,
         default=1
     )
+    parser.add_argument(
+    "--plot_fits",
+    help="plot each optimization results",
+    action="store_true",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_arguments()
+
+    signal.signal(signal.SIGINT, signal_handler)   
+    signal.signal(signal.SIGTERM, signal_handler)  
+    signal.signal(signal.SIGQUIT, signal_handler)
+
     
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -79,6 +91,33 @@ def main():
     
     errors_outpath = os.path.join(args.output_dir, 'errors.csv')
     model.save(errors_outpath)
+
+
+    plots_dir = os.path.join(args.output_dir, 'fit_plots')
+    os.makedirs(plots_dir, exist_ok=True)
+
+    if args.plot_fits:
+        figsize = (12, 5)  
+        for i, row in model.get_summary_table().iterrows():
+            result_x = row.result_x
+            reconstructed = row.reconstructed
+            lamb = row.lamb
+            
+            fig, axs = plt.subplots(1, 2, figsize=figsize)
+            axs[0].plot(result_x, linewidth=2)
+            axs[0].set_title("Deconvolved Distribution", fontsize=14)
+            axs[0].grid(True, alpha=0.3)
+
+            axs[1].plot(reconstructed, label="Model (P * P)", linewidth=2)
+            axs[1].plot(model.hist, label="Experimental", linewidth=2, alpha=0.7)
+            axs[1].set_title("Histogram Comparison", fontsize=14)
+            axs[1].legend(fontsize=12)
+            axs[1].grid(True, alpha=0.3)
+
+            save_path = os.path.join(plots_dir, f'fitplot{lamb}.png')
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')  
+            plt.close(fig)  
+
 
 
 if __name__ == '__main__':
