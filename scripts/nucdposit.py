@@ -17,6 +17,7 @@ from EMmodel import bamloader, em_model, functools
 
 def signal_handler(signum, frame):
     print(f"\nReceived signal {signum}, terminating...")
+    raise KeyboardInterrupt
     sys.exit(1)
 
 
@@ -55,7 +56,7 @@ def worker(window_index, temp_dir):
     else:
         df = model.to_df()
         df.insert(0, 'chr', window_data['chromosome']) 
-        temp_file = os.path.join(temp_dir, f"temp_{os.getpid()}_{window_index}.csv")
+        temp_file = os.path.join(temp_dir, f"temp_{os.getpid()}.csv")
         df.to_csv(temp_file, header=False, index=False, mode='a')
         return True
 
@@ -63,7 +64,7 @@ def worker(window_index, temp_dir):
 def merge_dfs(temp_dir, outdir):
     print("Merging...")
     combined_df = []
-    searching_path = os.path.join(temp_dir, '*.csv')
+    searching_path = os.path.abspath(os.path.join(temp_dir, '*.csv'))
     print(f"searching in {searching_path}")
     
     for filepath in glob.glob(searching_path):
@@ -106,13 +107,12 @@ def parallel_window_processing(bam_path, chromosome, window_size, step, device,
                 initargs=init_params
             ) as pool:
                 worker_func = partial(worker, temp_dir=temp_dir)
-                indices = list(range(total))
+                indices = range(total)
                 results = pool.imap_unordered(worker_func, indices, chunksize=10)
                 with tqdm(total=total, desc=f"Processing chromosome {chromosome}") as pbar:
                     for res in results:
                         if isinstance(res, Exception):
                             print(f"\nERROR: {res}")
-                            raise error
                         elif isinstance(res, str) and "Error" in res:
                             print(f"\n{res}")
                         pbar.update(1)
