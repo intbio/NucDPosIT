@@ -41,7 +41,7 @@ class EMModel:
             errors = path
         else:
             raise TypeError(f'cannot read path {path}')
-        errors /= errors.sum()
+        errors  = errors / errors.sum()
         return errors
 
     def __validate_cords(self, cords):

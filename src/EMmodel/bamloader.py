@@ -54,6 +54,7 @@ class BaseBamIterator(ABC):
                 list(map(lambda x: x[1].reference_end, paired_records))
             ).view(-1, 1),
             "id": list(map(lambda x: x[0].qname, paired_records)),
+            'chromosome': self.chromosome
         }
     
     def _collect_paired_reads(self, records):
@@ -105,7 +106,7 @@ class BamFileIterator(BaseBamIterator):
         self,
         pysam_path,
         chromosome,
-        window_size=4000,
+        window_size=5000,
         start=0,
         stop=None,
         step=3500,
@@ -129,6 +130,7 @@ class BamFileIterator(BaseBamIterator):
                 "start": torch.tensor([]).view(-1, 1),
                 "end": torch.tensor([]).view(-1, 1),
                 "id": [],
+                'chromosome': self.chromosome
             }
         
         records = self._fetch_records(cur_start, cur_stop)

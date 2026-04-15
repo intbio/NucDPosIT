@@ -100,7 +100,7 @@ class HistogramDeconvolution:
         loss = np.sum((self.Q - np.convolve(P, P).reshape(-1, 1)) ** 2) + reg
         return loss
 
-    def fit(self, method="SLSQP", tol=1e-30, maxiter=1000, **kwargs):
+    def fit(self, method="SLSQP", tol=1e-30, maxiter=2000, **kwargs):
         bounds = [(0, 1) for _ in range(self.k)]
         constraints = {"type": "eq", "fun": lambda p: np.sum(p) - 1}
         self.result = spy.optimize.minimize(
@@ -184,7 +184,7 @@ class HistogramDeconvolution:
             self.result.x, 
             delimiter=",",
             comments="", 
-            fmt="%d"
+            fmt="%f"
         )
 
 
