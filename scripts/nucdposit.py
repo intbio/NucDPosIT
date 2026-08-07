@@ -107,7 +107,7 @@ def main():
 
 
     try:
-        model = em_model.StochasticEMMOdel(  
+        model = em_model.StochasticEMModel(  
             args.errorpath,           
             args.dyad_dist,           
             args.min_iter,            
@@ -150,8 +150,9 @@ def main():
             fit_res = model.fit(L, R)
         except KeyboardInterrupt:
             logger.debug('cleaning buffer')
-            df = pd.concat(dfs, ignore_index=True)  
-            df.to_csv(args.output)  
+            if len(dfs) != 0:
+                df = pd.concat(dfs, ignore_index=True)  
+                df.to_csv(args.output)  
             sys.exit(1)
         except Exception as error:
             logger.error(f"{loader.dataset.chromosome, loader.dataset.window_start, loader.dataset.window_stop}", exc_info=True)

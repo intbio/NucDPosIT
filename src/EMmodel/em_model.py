@@ -4,6 +4,10 @@ import numpy as np
 import pandas as pd
 import torch
 from functools import lru_cache
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class EMModel:
@@ -151,14 +155,9 @@ class EMModel:
             self.weights                
         )
         
-        # Обновляем диады и веса
         self.dyads = unique_dyads.reshape(-1, 1)
         self.weights = new_weights
-        
-        # Нормализуем веса
         self.weights = self.weights / self.weights.sum()
-        
-        # Пересоздаем матрицу вероятностей с обновленными диадами
         self.probs_matrix = self.create_probs_matrix(self.dyads)
 
 
@@ -334,7 +333,7 @@ class EMModel:
         return df
 
 
-class StochasticEMMOdel(EMModel):
+class StochasticEMModel(EMModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -351,11 +350,8 @@ class StochasticEMMOdel(EMModel):
     def sample_multinomial_vectorized_torch(self):
         if torch.isnan(self.Hij).any():
             raise ValueError("Hij matrix contains nan")
-        samples = torch.multinomial(self.Hij, num_samples=1).squeeze(-1)
-        n_classes = self.Hij.shape[-1]
-        stochastic_res = torch.zeros(
-            (samples.shape[0], n_classes), device=self.device, dtype=torch.double
-        )
-        stochastic_res.scatter_(1, samples.unsqueeze(-1), 1.0)
-
-        return stochastic_res
+        samples = torch.multinomial(self.Hij, num_samples=1)
+        return torch.nn.functional.one_hot(
+            samples.squeeze(-1), 
+            num_classes=self.Hij.shape[-1]
+        ).double()
