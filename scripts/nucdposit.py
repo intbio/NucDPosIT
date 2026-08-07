@@ -50,6 +50,12 @@ def parse_args():
     parser.add_argument('--max_iter', type=int,
                         help='max amount of iteration in optimization step',
                        default=500)
+    parser.add_argument('--window_size', type=int,
+                        help='size of scanning window',
+                       default=5000)
+    parser.add_argument('--step', type=int,
+                        help='step of scanning',
+                       default=4800)
     return parser.parse_args()
 
 
@@ -125,7 +131,7 @@ def main():
                                 start=0,
                                 stop=None,
                                 step=4800,
-                                window_size=500)
+                                window_size=args.window_size)
     except Exception as error:
         logger.error(f"Iterator creation error: {error}", exc_info=True)
         raise error
@@ -153,6 +159,8 @@ def main():
             logger.info(f"window {i} processed: {loader.dataset.chromosome, loader.dataset.window_start, loader.dataset.window_stop}")
             cur_df = model.to_df()
             cur_df['ref'] = loader.dataset.chromosome
+            cur_df['batch_i'] = i
+            cur_df['qid'] = batch['id']
             dfs.append(cur_df)
             if len(dfs) == 50:
                 df = pd.concat(dfs, ignore_index=True)  
