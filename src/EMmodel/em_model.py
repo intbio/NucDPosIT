@@ -81,7 +81,6 @@ class EMModel:
             weights /= weights.sum()
         return weights
 
-    @lru_cache
     def create_probs_matrix(self, dyads):
         n_dyads = dyads.shape[0]
         n_reads = self.nreads
@@ -119,8 +118,8 @@ class EMModel:
             logits_stable = logits - logits_max
             exp_logits = torch.exp(logits_stable)
             self.Hij = exp_logits / (exp_logits.sum(dim=1, keepdim=True) + 1e-50)
-            if torch.isnan(self.Hij).any() or torch.isinf(self.Hij).any():
-                raise ValueError("Hij contains NaN or inf")
+            if self.Hij.isnan().any():
+                self.delete_components()
 
     def m_step(self):
         with torch.amp.autocast(device_type=self.device):
@@ -184,7 +183,7 @@ class EMModel:
     
         flat_dyads = self.dyads.flatten()   
         distances = torch.abs(flat_dyads - new_dyad) 
-        insert_ind = distances.argmin().item()
+        insert_ind = distances.argmin()
     
         self.dyads = torch.cat([
             self.dyads[:insert_ind],
@@ -240,7 +239,7 @@ class EMModel:
         return items_loglh
 
     def update_sliding_mean(self):
-        cur_logLH = self.logLH().item()
+        cur_logLH = self.logLH()
         self.logLH_history.append(cur_logLH)
         if len(self.sliding_mean_history) != 0:
             new_slmean = self.alpha * cur_logLH + self.sliding_mean_history[-1] * (1 - self.alpha)
@@ -269,22 +268,13 @@ class EMModel:
 
         for i in range(self.nfits):
             self.add_component()
-            if convergence_flag:
-                break
             for i in range(self.max_iter):
                 self.temperature = self.temperature_coef / np.log(i + 2)
-                try:
-                    self.e_step()
-                except ValueError:
-                    self.delete_components()
-                    self.e_step()
-                    self.m_step()
-                    continue
-                self.m_step() 
-
+                self.e_step()
+                self.m_step()
+                self.delete_components()
                 self.merge_duplicate_dyads()
-                if i % 5 == 0:
-                    self.delete_components() 
+
                 self.update_sliding_mean()
                 self.dyads_history.append(self.ndyads)
 
@@ -296,7 +286,6 @@ class EMModel:
                     delta = abs(self.sliding_mean_history[-1] - self.sliding_mean_history[-2])
                     if delta < self.tol:
                         logger.info(f"Convergence reached at iteration {i} (delta={delta:.6f})")
-                        # convergence_flag = True
                         break
 
         # self.__dict__.update(best_state)
@@ -327,8 +316,10 @@ class StochasticEMModel(EMModel):
         self.weights /= self.weights.sum()
 
     def sample_multinomial_vectorized_torch(self):
-        if torch.isnan(self.Hij).any():
-            raise ValueError("Hij matrix contains nan")
+        if self.Hij.isnan().any():
+            self.delete_components()
+            self.e_step()
+            return self.sample_multinomial_vectorized_torch()
         samples = torch.multinomial(self.Hij, num_samples=1)
         return torch.nn.functional.one_hot(
             samples.squeeze(-1), 
