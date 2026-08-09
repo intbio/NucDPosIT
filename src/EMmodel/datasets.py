@@ -86,6 +86,14 @@ class NucdpositDataset(Dataset, ABC):
         pass
 
     @abstractmethod
+    def get_window_start(self):
+        pass
+
+    @abstractmethod
+    def get_window_end(self):
+        pass
+
+    @abstractmethod
     def process_records(self) -> list:
         pass
 
@@ -102,6 +110,8 @@ class NucdpositDataset(Dataset, ABC):
             "starts": self.get_segment_starts(records),
             "ends": self.get_segment_ends(records),
             "id": self.get_segment_ids(records),
+            'window_start': self.get_window_start(),
+            'window_end': self.get_window_end()
         }
         return items
 
@@ -204,6 +214,12 @@ class BamDataset(NucdpositDataset):
         paired_records = self._collect_paired_reads(records)
         return paired_records
 
+    def get_window_start(self):
+        return self.window_start
+
+    def get_window_end(self):
+        return self.window_stop
+
     def __len__(self):
         total_windows = 0
         chrom_lengths = self.get_chromosome_lengths()
@@ -287,6 +303,12 @@ class BamRegionsDataset(NucdpositDataset):
     def get_segment_ids(self, records):
         ids = [pair[0].query_name for pair in records]
         return ids
+
+    def get_window_start(self):
+        return self.window_start
+
+    def get_window_end(self):
+        return self.window_stop
 
     def __getitem__(self, idx):
         items = super().__getitem__(idx)

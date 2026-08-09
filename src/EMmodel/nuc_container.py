@@ -58,7 +58,7 @@ class NucleosomeContainer:
 
     @staticmethod
     def from_df(df, start="start", end="end", dyad="dyad", weights:list=None):
-        weights = weights if weights is not None else np.ones_like(df)
+        weights = weights if weights is not None else np.ones(len(df))
         container = NucleosomeContainer()
         for i, row in df.iterrows():
             cur_start, cur_end, cur_dyad, cur_weight = (

@@ -3,6 +3,7 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
+from torch.cuda.amp import autocast
 from functools import lru_cache
 import logging
 
@@ -16,11 +17,11 @@ class EMModel:
         errors,
         dyad_dist,
         min_iter=10,
-        max_iter=2000,
+        max_iter=50,
         nfits = 50,
         reg_coef=0,
         temperature_coef=1,
-        tol=0.0001,
+        tol=1e-3,
         device="cpu",
         alpha=0.5,
     ):
@@ -110,22 +111,32 @@ class EMModel:
         return result
 
     def e_step(self):
-        self.probs_matrix = self.create_probs_matrix(self.dyads)
-        self.Hij = (self.probs_matrix * self.weights.T) ** (1 / self.temperature) / (self.probs_matrix @ self.weights + 1e-50) ** (1 / self.temperature)
-        if self.Hij.isnan().any():
-            raise ValueError("Hij has None")
+        with autocast():
+            self.probs_matrix = self.create_probs_matrix(self.dyads)
+            log_probs = torch.log(self.probs_matrix + 1e-50)      # (n_reads, n_dyads)
+            log_weights = torch.log(self.weights.T + 1e-50)       # (1, n_dyads) – broadcasting
+            logits = (log_probs + log_weights) / self.temperature
+            logits_max = logits.max(dim=1, keepdim=True)[0]
+            logits_stable = logits - logits_max
+            exp_logits = torch.exp(logits_stable)
+            self.Hij = exp_logits / (exp_logits.sum(dim=1, keepdim=True) + 1e-50)
+            if torch.isnan(self.Hij).any() or torch.isinf(self.Hij).any():
+                raise ValueError("Hij contains NaN or inf")
 
     def m_step(self):
-        self.dyads = (
-            self.starts.min()
-            + torch.argmax(self.grid_probs.T @ self.Hij, dim=0, keepdim=True).T
-        )
-        self.weights = self.Hij.sum(0, keepdim=True).T
-        self.weights = self.weights / self.weights.sum() - self.reg_coef / self.nreads
-        self.weights[self.weights < 0] = 0
-        self.weights /= self.weights.sum()
-        if (self.weights == 0).all() or self.weights.isnan().all():
-            raise ValueError("all weights = 0. It seems reg_coef is too high")
+        with autocast():
+            self.dyads = (
+                self.starts.min()
+                + torch.argmax(self.grid_probs.T @ self.Hij, dim=0, keepdim=True).T
+            )
+            self.weights = self.Hij.sum(0, keepdim=True).T
+            self.weights = self.weights / self.weights.sum() - self.reg_coef / self.nreads
+            if (self.weights <= 0).any():
+                self.delete_components()
+            else:
+                self.weights /= self.weights.sum()
+            if (self.weights == 0).all() or self.weights.isnan().all():
+                raise ValueError("all weights = 0. It seems reg_coef is too high")
 
     def delete_components(self):
         keep_alive_mask = (self.weights > 0).bool().reshape(-1, 1)
@@ -228,101 +239,69 @@ class EMModel:
         mask = (self.weights > 0).squeeze()
         items_loglh = torch.log((self.probs_matrix[:, mask] * self.weights[mask].T).sum(axis=1))
         return items_loglh
-    
-    def fit(self, starts, stops, dyads=None, weights=None):
+
+    def update_sliding_mean(self):
+        cur_logLH = self.logLH().item()
+        self.logLH_history.append(cur_logLH)
+        if len(self.sliding_mean_history) != 0:
+            new_slmean = self.alpha * cur_logLH + self.sliding_mean_history[-1] * (1 - self.alpha)
+        else:
+            new_slmean = cur_logLH
+        self.sliding_mean_history.append(new_slmean)
+
+    def reset_sliding_mean(self):
+        self.sliding_mean_history = []
+        self.logLH_history = []
+
+    def fit(self, starts, stops, dyads=None, weights=None, verbose=False):
+        self.reset_sliding_mean()
         self.starts = self.__validate_cords(starts)
         self.stops = self.__validate_cords(stops)
         self.dyads = self.__validate_dyads(dyads)
         self.probs_matrix = self.create_probs_matrix(self.dyads)
         self.grid_probs = self.__create_grid_probs()
-        self.weights = self.__validate_weights(weights)        
-    
-        best_lh = -torch.inf
-        lh_history = []  
-        patience_counter = 0
-        ncomponents = []
-        
+        self.weights = self.__validate_weights(weights)
+        self.dyads_history = []
+        self.bic_history = []
+        convergence_flag = False
+
+        best_loglh = -np.inf
+        best_state = None
+
         for i in range(self.nfits):
-            if i != 0:
-                self.add_component()
-            try:
-                fit_history = self.fit_sliding_mean(self.min_iter, self.max_iter, self.alpha)  
-            except ValueError:
-                print(f"{self.ndyads} skip")
-                continue
-            else:
-                lh_history.extend(fit_history['lhloss'])
-                
-                current_lh = fit_history['model_lh']
-                if self.logLH() < fit_history['model_lh']:
-                    self.__dict__ = fit_history['model'].__dict__
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    
-                ncomponents.append(self.ndyads)  
-                if patience_counter >= 3:
-                    break
-    
-        return {'lh': lh_history, 'nweights': ncomponents}
+            self.add_component()
+            if convergence_flag:
+                break
+            for i in range(self.max_iter):
+                self.temperature = self.temperature_coef / np.log(i + 2)
+                try:
+                    self.e_step()
+                except ValueError:
+                    self.delete_components()
+                    self.e_step()
+                    self.m_step()
+                    continue
+                self.m_step() 
 
-    def fit_sliding_mean(self, min_iter, max_iter, alpha, history=None):
-        assert min_iter < max_iter
-        assert alpha > 0
-        
-        if history is None:
-            history = {
-                'lhloss': [],
-                'sliding_mean': [],
-                'success': None,
-                'model_lh': -torch.inf
-            }
-        
-        sliding_mean = None
-        prev_sliding_mean = -torch.inf
-        best_model = None
-        best_lh = -torch.inf
-
-        # self.delete_components()
-        for i in range(max_iter):
-            # Обновляем температуру
-            self.temperature = self.temperature_coef / np.log(i + 2) 
-            
-            self.e_step()
-            self.m_step()
-            if i % 20 == 0:
                 self.merge_duplicate_dyads()
-                self.e_step()
-                self.m_step()
-            
-            cur_lh = self.logLH().item()
-            history['lhloss'].append(cur_lh)
-            
-            # Обновляем скользящее среднее
-            if sliding_mean is None:
-                sliding_mean = cur_lh
-            else:
-                sliding_mean = alpha * cur_lh + (1 - alpha) * sliding_mean
-            history['sliding_mean'].append(sliding_mean)
-            
-            if cur_lh > best_lh:
-                best_lh = cur_lh
-                best_model = copy.deepcopy(self)
-            
-            delta = abs(sliding_mean - prev_sliding_mean)
-            prev_sliding_mean = sliding_mean
-            
-            if delta < self.tol and i > min_iter:
-                history['success'] = True
-                history['model'] = best_model
-                history['model_lh'] = best_lh
-                return history
-        
-        # Если достигли max_iter без остановки
-        history['success'] = False
-        history['model'] = best_model
-        history['model_lh'] = best_lh
-        return history
+                if i % 5 == 0:
+                    self.delete_components() 
+                self.update_sliding_mean()
+                self.dyads_history.append(self.ndyads)
+
+                cur_lh = self.logLH()
+                if cur_lh > best_loglh:
+                    best_loglh = cur_lh
+
+                if len(self.sliding_mean_history) >= 2 and i >= self.min_iter:
+                    delta = abs(self.sliding_mean_history[-1] - self.sliding_mean_history[-2])
+                    if delta < self.tol:
+                        logger.info(f"Convergence reached at iteration {i} (delta={delta:.6f})")
+                        # convergence_flag = True
+                        break
+
+        # self.__dict__.update(best_state)
+        return self
         
     def to_df(self):
         df = pd.DataFrame(
