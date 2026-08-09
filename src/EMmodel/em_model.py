@@ -3,7 +3,6 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
-from torch.cuda.amp import autocast
 from functools import lru_cache
 import logging
 
@@ -111,7 +110,7 @@ class EMModel:
         return result
 
     def e_step(self):
-        with autocast():
+        with torch.amp.autocast(device_type=self.device):
             self.probs_matrix = self.create_probs_matrix(self.dyads)
             log_probs = torch.log(self.probs_matrix + 1e-50)      # (n_reads, n_dyads)
             log_weights = torch.log(self.weights.T + 1e-50)       # (1, n_dyads) – broadcasting
@@ -124,7 +123,7 @@ class EMModel:
                 raise ValueError("Hij contains NaN or inf")
 
     def m_step(self):
-        with autocast():
+        with torch.amp.autocast(device_type=self.device):
             self.dyads = (
                 self.starts.min()
                 + torch.argmax(self.grid_probs.T @ self.Hij, dim=0, keepdim=True).T
@@ -323,7 +322,8 @@ class StochasticEMModel(EMModel):
         self.dyads = self.starts.min() + max_indices
         self.weights = self.stochastic_res.sum(0, keepdim=True).T
         self.weights = self.weights / self.weights.sum() - self.reg_coef / self.nreads
-        self.weights[self.weights < 0] = 0
+        if (self.weights <= 0).any():
+            self.delete_components()
         self.weights /= self.weights.sum()
 
     def sample_multinomial_vectorized_torch(self):
