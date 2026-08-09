@@ -101,25 +101,21 @@ class EMModel:
 
     def __insert_probs_to_matrix(self, idx_matrix, errors):
         idx = idx_matrix.round().long()
-        valid_mask = (idx >= 0) & (idx < len(errors))
-        result = torch.zeros_like(idx_matrix, dtype=float) + 1e-50
-        valid_indices = idx[valid_mask]
-        result[valid_mask] = errors[valid_indices]
-
+        idx_clamped = idx.clamp(0, len(errors) - 1)
+        result = errors[idx_clamped]
+        invalid = (idx < 0) | (idx >= len(errors))
+        result[invalid] = 1e-50
         return result
 
     def e_step(self):
         with torch.amp.autocast(device_type=self.device):
             self.probs_matrix = self.create_probs_matrix(self.dyads)
-            log_probs = torch.log(self.probs_matrix + 1e-50)      # (n_reads, n_dyads)
-            log_weights = torch.log(self.weights.T + 1e-50)       # (1, n_dyads) – broadcasting
+            log_probs = torch.log(self.probs_matrix)      # (n_reads, n_dyads)
+            log_weights = torch.log(self.weights.T)       # (1, n_dyads) – broadcasting
             logits = (log_probs + log_weights) / self.temperature
-            logits_max = logits.max(dim=1, keepdim=True)[0]
-            logits_stable = logits - logits_max
-            exp_logits = torch.exp(logits_stable)
-            self.Hij = exp_logits / (exp_logits.sum(dim=1, keepdim=True) + 1e-50)
-            if self.Hij.isnan().any():
-                self.delete_components()
+            self.Hij = torch.softmax(logits, dim=1)
+            # if self.Hij.isnan().any():
+            #     self.delete_components()
 
     def m_step(self):
         with torch.amp.autocast(device_type=self.device):
@@ -238,8 +234,8 @@ class EMModel:
         items_loglh = torch.log((self.probs_matrix[:, mask] * self.weights[mask].T).sum(axis=1))
         return items_loglh
 
-    def update_sliding_mean(self):
-        cur_logLH = self.logLH()
+    def update_sliding_mean(self, cur_logLH=None):
+        cur_logLH = cur_logLH if cur_logLH else self.logLH()
         self.logLH_history.append(cur_logLH)
         if len(self.sliding_mean_history) != 0:
             new_slmean = self.alpha * cur_logLH + self.sliding_mean_history[-1] * (1 - self.alpha)
@@ -260,7 +256,6 @@ class EMModel:
         self.grid_probs = self.__create_grid_probs()
         self.weights = self.__validate_weights(weights)
         self.dyads_history = []
-        self.bic_history = []
         convergence_flag = False
 
         best_loglh = -np.inf
@@ -275,10 +270,10 @@ class EMModel:
                 self.delete_components()
                 self.merge_duplicate_dyads()
 
-                self.update_sliding_mean()
                 self.dyads_history.append(self.ndyads)
 
                 cur_lh = self.logLH()
+                self.update_sliding_mean(cur_lh)
                 if cur_lh > best_loglh:
                     best_loglh = cur_lh
 
@@ -287,8 +282,6 @@ class EMModel:
                     if delta < self.tol:
                         logger.info(f"Convergence reached at iteration {i} (delta={delta:.6f})")
                         break
-
-        # self.__dict__.update(best_state)
         return self
         
     def to_df(self):
@@ -298,6 +291,7 @@ class EMModel:
         df["dyads"] = self.dyads[self.Hij.argmax(1)].cpu()
         df["template|dyad"] = self.Hij.max(1)[0].cpu()
         return df
+        
 
 
 class StochasticEMModel(EMModel):
