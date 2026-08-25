@@ -4,7 +4,12 @@ import pandas as pd
 
 
 def bedtools_getfasta(df, genome_path, weights=False):
-    bed_file = pbt.BedTool.from_dataframe(df)
+    if isinstance(df, pd.DataFrame):
+        bed_file = pbt.BedTool.from_dataframe(df)
+    elif isinstance(df, pbt.bedtool.BedTool):
+        bed_file = df
+    else:
+        raise TypeError(f"format of df: {type(df).__name__} is not supported")
     sequences = bed_file.sequence(
         fi=genome_path,
         name=True,

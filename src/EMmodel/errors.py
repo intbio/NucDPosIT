@@ -22,6 +22,8 @@ class ErrorsProbs:
         return errors
 
     def __getitem__(self, items):
+        if not isinstance(items, np.ndarray):
+            items = np.array(items)
         res = np.zeros_like(items, dtype=float)
         mask = ((items >= 0) & (items < len(self.errors)))
         res[mask] = self.errors[items[mask]]

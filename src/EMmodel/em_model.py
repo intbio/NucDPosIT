@@ -35,6 +35,12 @@ class EMModel:
         self.alpha = alpha
         self.temperature_coef = temperature_coef
 
+
+        self.full_probs = None          # будет хранить матрицу P(dyad | read) для всех возможных dyad
+        self.log_full_probs = None      # логарифм от full_probs (используется в m_step)
+        self.start_min = None           # для быстрого вычисления индексов
+        self.position_count = None  
+
     @property
     def nreads(self):
         return len(self.starts)
@@ -82,14 +88,10 @@ class EMModel:
         return weights
 
     def create_probs_matrix(self, dyads):
-        n_dyads = dyads.shape[0]
-        n_reads = self.nreads
-        left_diff = dyads - self.starts.view(1, -1)
-        right_diff = self.stops.view(1, -1) - dyads
-
-        L_index = self.__insert_probs_to_matrix(left_diff, self.errors)
-        R_index = self.__insert_probs_to_matrix(right_diff, self.errors)
-        return (L_index * R_index).T
+        if self.full_probs is None:
+            self.__create_grid_probs()
+        indices = (dyads.flatten() - self.start_min).long()
+        return self.full_probs[:, indices]   # (n_reads, n_dyads)
 
     def __create_grid_probs(self):
         potential_dyads = torch.arange(
@@ -99,14 +101,6 @@ class EMModel:
         probs = torch.log(self.create_probs_matrix(potential_dyads) + 1e-50)
         return probs
 
-    def __insert_probs_to_matrix(self, idx_matrix, errors):
-        idx = idx_matrix.round().long()
-        idx_clamped = idx.clamp(0, len(errors) - 1)
-        result = errors[idx_clamped]
-        invalid = (idx < 0) | (idx >= len(errors))
-        result[invalid] = 1e-50
-        return result
-
     def e_step(self):
         with torch.amp.autocast(device_type=self.device):
             self.probs_matrix = self.create_probs_matrix(self.dyads)
@@ -114,8 +108,6 @@ class EMModel:
             log_weights = torch.log(self.weights.T)       # (1, n_dyads) – broadcasting
             logits = (log_probs + log_weights) / self.temperature
             self.Hij = torch.softmax(logits, dim=1)
-            # if self.Hij.isnan().any():
-            #     self.delete_components()
 
     def m_step(self):
         with torch.amp.autocast(device_type=self.device):
@@ -247,42 +239,80 @@ class EMModel:
         self.sliding_mean_history = []
         self.logLH_history = []
 
+    def __create_grid_probs(self):
+        """Вычислить один раз full_probs для всех возможных dyad и сохранить в кэш."""
+        if self.full_probs is not None:
+            return 
+
+        start_min = self.starts.min()
+        stop_max = self.stops.max()
+        potential_dyads = torch.arange(start_min, stop_max + 1, device=self.device).reshape(-1, 1)
+        left_diff = potential_dyads - self.starts.view(1, -1)   # (n_positions, n_reads)
+        right_diff = self.stops.view(1, -1) - potential_dyads   # (n_positions, n_reads)
+        
+        def insert_probs(diff_matrix, errors):
+            idx = diff_matrix.round().long()
+            idx_clamped = idx.clamp(0, len(errors) - 1)
+            result = errors[idx_clamped]  # (n_positions, n_reads)
+            invalid = (idx < 0) | (idx >= len(errors))
+            result[invalid] = 1e-50
+            return result
+
+        L_probs = insert_probs(left_diff, self.errors)
+        R_probs = insert_probs(right_diff, self.errors)
+        full_probs = (L_probs * R_probs).T  
+
+        self.full_probs = full_probs
+        self.log_full_probs = torch.log(full_probs + 1e-50)
+        self.start_min = start_min
+        self.position_count = potential_dyads.shape[0]
+
+
+
     def fit(self, starts, stops, dyads=None, weights=None, verbose=False):
-        self.reset_sliding_mean()
-        self.starts = self.__validate_cords(starts)
-        self.stops = self.__validate_cords(stops)
-        self.dyads = self.__validate_dyads(dyads)
-        self.probs_matrix = self.create_probs_matrix(self.dyads)
-        self.grid_probs = self.__create_grid_probs()
-        self.weights = self.__validate_weights(weights)
-        self.dyads_history = []
-        convergence_flag = False
+        with torch.no_grad():
+            self.reset_sliding_mean()
+            self.starts = self.__validate_cords(starts)
+            self.stops = self.__validate_cords(stops)
 
-        best_loglh = -np.inf
-        best_state = None
+            self.full_probs = None
+            self.log_full_probs = None
+            self.start_min = None
+            self.position_count = None
 
-        for i in range(self.nfits):
-            self.add_component()
-            for i in range(self.max_iter):
-                self.temperature = self.temperature_coef / np.log(i + 2)
-                self.e_step()
-                self.m_step()
-                self.delete_components()
-                self.merge_duplicate_dyads()
+            self.dyads = self.__validate_dyads(dyads)
+            self.probs_matrix = self.create_probs_matrix(self.dyads)
 
-                self.dyads_history.append(self.ndyads)
+            self.weights = self.__validate_weights(weights)
+            self.log_weights = torch.log(self.weights.T + 1e-50)
+            self.dyads_history = []
 
-                cur_lh = self.logLH()
-                self.update_sliding_mean(cur_lh)
-                if cur_lh > best_loglh:
-                    best_loglh = cur_lh
+            best_loglh = -np.inf
 
-                if len(self.sliding_mean_history) >= 2 and i >= self.min_iter:
-                    delta = abs(self.sliding_mean_history[-1] - self.sliding_mean_history[-2])
-                    if delta < self.tol:
-                        logger.info(f"Convergence reached at iteration {i} (delta={delta:.6f})")
-                        break
-        return self
+            for fit_iter in range(self.nfits):
+                self.add_component()
+                for i in range(self.max_iter):
+                    self.temperature = self.temperature_coef / np.log(i + 2)
+                    self.inv_temperature = 1.0 / self.temperature
+                    self.e_step()
+                    self.m_step()
+                    self.delete_components()
+                    self.merge_duplicate_dyads()
+
+                    self.dyads_history.append(self.ndyads)
+
+                    cur_lh = self.logLH()
+                    self.update_sliding_mean(cur_lh)
+                    if cur_lh > best_loglh:
+                        best_loglh = cur_lh
+
+                    if len(self.sliding_mean_history) >= 2 and i >= self.min_iter:
+                        delta = abs(self.sliding_mean_history[-1] - self.sliding_mean_history[-2])
+                        if delta < self.tol:
+                            break
+
+            self.e_step()
+            return self
         
     def to_df(self):
         df = pd.DataFrame(
@@ -299,15 +329,22 @@ class StochasticEMModel(EMModel):
         super().__init__(*args, **kwargs)
 
     def m_step(self):
-        self.stochastic_res = self.sample_multinomial_vectorized_torch()
-        self.weighted_sum = torch.matmul(self.grid_probs.T, self.stochastic_res)
-        max_indices = torch.argmax(self.weighted_sum, dim=0, keepdim=True).T
-        self.dyads = self.starts.min() + max_indices
-        self.weights = self.stochastic_res.sum(0, keepdim=True).T
-        self.weights = self.weights / self.weights.sum() - self.reg_coef / self.nreads
-        if (self.weights <= 0).any():
-            self.delete_components()
-        self.weights /= self.weights.sum()
+        with torch.amp.autocast(device_type=self.device):
+            # Генерируем one-hot сэмплы (float32)
+            self.stochastic_res = self.sample_multinomial_vectorized_torch()  # (n_reads, n_dyads)
+            # Умножаем транспонированные сэмплы на логарифм вероятностей
+            weighted_sum = torch.matmul(self.stochastic_res.T, self.log_full_probs)  # (n_dyads, n_positions)
+            max_indices = torch.argmax(weighted_sum, dim=1, keepdim=True)
+            self.dyads = self.start_min + max_indices.float()
+
+            # Обновляем веса как сумму сэмплов по reads
+            self.weights = self.stochastic_res.sum(0, keepdim=True).T
+            self.weights = self.weights / self.weights.sum() - self.reg_coef / self.nreads
+
+            if (self.weights <= 0).any():
+                self.delete_components()
+            self.weights /= self.weights.sum()
+            self.log_weights = torch.log(self.weights.T + 1e-50)
 
     def sample_multinomial_vectorized_torch(self):
         if self.Hij.isnan().any():

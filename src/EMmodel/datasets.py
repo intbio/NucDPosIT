@@ -183,7 +183,7 @@ class BamDataset(NucdpositDataset):
         return ends
 
     def get_segment_ids(self, records):
-        ids = [pair[0].query_name for pair in records]
+        ids = [str(pair[0].query_name) for pair in records]
         return ids
 
     def choose_chromosome(self, chromo_idx):
@@ -301,7 +301,7 @@ class BamRegionsDataset(NucdpositDataset):
         return ends
 
     def get_segment_ids(self, records):
-        ids = [pair[0].query_name for pair in records]
+        ids = [str(pair[0].query_name) for pair in records]
         return ids
 
     def get_window_start(self):
