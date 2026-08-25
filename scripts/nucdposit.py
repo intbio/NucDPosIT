@@ -20,7 +20,7 @@ def parse_args():
                         help='Path to error file')
     parser.add_argument('--out_dir', type=str, default='./nucdpst_res',
                         help='Output directory path')
-    parser.add_argument('--dyad_dist', type=int, default=40,
+    parser.add_argument('--dyad_dist', type=int, default=80,
                         help='Initial dyad distance')
     parser.add_argument('--nfits', type=int, default=50,
                         help='number of optimization steps')
@@ -166,11 +166,10 @@ def main():
             cur_df['qid'] = batch['id']
             dfs.append(cur_df)
 
-            # Если накопилось 10 фреймов – сбрасываем на диск
-            if len(dfs) >= 10:
+            if len(dfs) >= 5:
                 df = pd.concat(dfs, ignore_index=True)
                 save_dataframe(df, output_csv, header=not header_written)
-                header_written = True   # после первой записи заголовок уже есть
+                header_written = True   
                 dfs.clear()
 
     # --- Остаток данных после цикла ---
