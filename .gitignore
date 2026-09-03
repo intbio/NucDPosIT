@@ -4,6 +4,9 @@ tests/*
 slurm/*
 nextflow/*
 .vscode/*
+scripts/build_genome_index/*
+scripts/download_experiments/*
+/scripts/fimo_scan/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
