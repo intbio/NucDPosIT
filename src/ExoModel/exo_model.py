@@ -14,7 +14,8 @@ from collections import Counter
 from typing import Optional, Dict, Tuple, Union
 from pathlib import Path
 import numpy as np
-
+import json
+import pandas as pd
 
 
 
@@ -188,6 +189,7 @@ class HistogramDeconvolution:
         )
 
 
+
 class AdaptiveHistogramDeconvolution(HistogramDeconvolution):
 
     def __init__(self, hist, lamb_range=(1, 50), n_jobs=1, **kwargs):
@@ -199,13 +201,8 @@ class AdaptiveHistogramDeconvolution(HistogramDeconvolution):
         self.all_results = []
 
     def save(self, outdir: str):
-        np.savetxt(
-            outdir,
-            self.best_result['result_x'], 
-            delimiter=",",
-            comments="", 
-            fmt="%f"
-        )
+        df = pd.DataFrame(self.all_results)
+        df.to_csv(outdir)
 
     @staticmethod
     def _evaluate_lamb(lamb, hist, center_loc, center_scale, method, tol):

@@ -61,8 +61,8 @@ def parse_arguments():
         default=1
     )
     parser.add_argument(
-        "--plot_fits",
-        help="plot each optimization results",
+        "--no_plot",
+        help="do not plot optimization results",
         action="store_true",
     )
     parser.add_argument(
@@ -107,7 +107,7 @@ def main():
     errors_outpath = os.path.join(args.output_dir, 'errors.csv')
     model.save(errors_outpath)
 
-    if args.plot_fits:
+    if not args.no_plot:
         plots_dir = os.path.join(args.output_dir, 'fit_plots')
         os.makedirs(plots_dir, exist_ok=True)
         figsize = (12, 5)  

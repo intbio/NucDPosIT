@@ -20,8 +20,6 @@ def parse_args():
                         help='JSON dict of SLURM parameters, e.g. \'{"time":"01:00:00","cpus":4}\'')
     parser.add_argument('--njobs', type=int, default=1,
                         help='number of jobs to spawn (each processes a subset of chromosomes)')
-    parser.add_argument('--merge', action='store_false',
-                        help='Wait for all jobs and merge results after completion')
     return parser.parse_args()
 
 def build_command(params, chromo_list, nucdposit_script, chunk_id):
@@ -77,17 +75,8 @@ def wait_for_jobs(job_ids, poll_interval=10):
         # Получаем список статусов (каждая строка – одно задание)
         states = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
         print(states)
-        # Могут быть строки с состоянием "COMPLETED", "RUNNING", "PENDING", "FAILED", "TIMEOUT", etc.
-        # Если все задания в терминальных состояниях (COMPLETED, FAILED, CANCELLED, TIMEOUT) – выходим
-        # Для простоты ждём, пока все будут COMPLETED (или завершены с ошибкой – тогда прерываем)
         all_done = all(s in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL") or s.startswith("CANCELLED") for s in states)
         if all_done:
-            # # Проверяем, нет ли FAILED или других ошибок
-            # failed = [s for s in states if s not in ("COMPLETED",)]
-            # if failed:
-            #     print(f"Some jobs failed: {failed}")
-            #     raise RuntimeError(f"Jobs failed with states: {failed}")
-            # print("All jobs completed successfully.")
             break
         # Если есть ещё выполняющиеся или ожидающие – ждём
         time.sleep(poll_interval)
@@ -163,7 +152,7 @@ def main():
 
     print(f"All {njobs} jobs submitted. Job IDs: {job_ids}")
 
-    if do_merge and job_ids:
+    if job_ids:
         # Ожидаем завершения всех заданий
         wait_for_jobs(job_ids, poll_interval=30)
 

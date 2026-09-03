@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import sys
 import os
 import argparse
@@ -40,7 +39,7 @@ def parse_args():
                         help='max iterations in optimization step')
     parser.add_argument('--window_size', type=int, default=5000,
                         help='size of scanning window')
-    parser.add_argument('--step', type=int, default=4800,
+    parser.add_argument('--step', type=int, default=None,
                         help='step of scanning')
     parser.add_argument('--accept_chromo', nargs='+', default=None,
                         help='Space-separated list of chromosomes to include')
@@ -84,20 +83,20 @@ def main():
 
     args = parse_args()
 
-    # Создаём выходную директорию (если её нет)
+    if args.step is None:
+        args.step = args.window_size - 300
+    assert args.step > 0, f"Invalid step: {args.step}"
+
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # Базовое имя файла (без расширения .bam)
     bam_basename = os.path.splitext(os.path.basename(args.alignment_path))[0]
 
-    # Лог-файл в выходной директории
     log_path = os.path.join(args.out_dir, f"{bam_basename}.log")
     setup_logging(log_path)
 
     logger = logging.getLogger(__name__)
     logger.info(f"Configuration:\n{pprint.pformat(vars(args), indent=2, width=120, sort_dicts=False)}")
 
-    # --- Создание модели ---
     try:
         model = em_model.StochasticEMModel(
             args.errorpath,
@@ -116,7 +115,7 @@ def main():
         raise
     logger.debug(f"Model {type(model).__name__} loaded")
 
-    # --- Создание Dataset / итератора ---
+
     try:
         factory = datasets.DatasetFactory()
         loader = factory.create_dataset(
@@ -124,8 +123,10 @@ def main():
             bed_file=args.regions_path,
             start=0,
             stop=None,
-            step=args.step,              # Используем переданный step
-            window_size=args.window_size
+            step=args.step,          
+            window_size=args.window_size,
+            except_chromo = args.except_chromo,
+            accept_chromo = args.accept_chromo
         )
     except Exception as e:
         logger.error(f"Iterator creation error: {e}", exc_info=True)
@@ -133,10 +134,9 @@ def main():
     logger.debug(f"Dataset {type(loader).__name__} loaded")
     logger.debug(f"Processing chromosomes: {', '.join(loader.processing_chromosomes)}")
 
-    # --- Выходной файл (один на чанк) ---
     output_csv = os.path.join(args.out_dir, f"{bam_basename}_dpst.csv")
     dfs = []
-    header_written = False   # флаг, чтобы записать заголовок только один раз
+    header_written = False  
 
     for i, batch in enumerate(loader):
         L = batch['starts'].to(args.device).reshape(-1, 1)
@@ -152,7 +152,6 @@ def main():
             logger.info("KeyboardInterrupt – saving buffer and exiting.")
             if dfs:
                 df = pd.concat(dfs, ignore_index=True)
-                # При прерывании дописываем без заголовка (или с заголовком, если ещё не было)
                 save_dataframe(df, output_csv, header=not header_written)
             sys.exit(1)
         except Exception as e:
@@ -172,7 +171,6 @@ def main():
                 header_written = True   
                 dfs.clear()
 
-    # --- Остаток данных после цикла ---
     if dfs:
         df = pd.concat(dfs, ignore_index=True)
         save_dataframe(df, output_csv, header=not header_written)

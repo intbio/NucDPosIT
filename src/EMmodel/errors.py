@@ -1,10 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 
 class ErrorsProbs:
-    def __init__(self, handler, *args, **kwargs):
-        self.__errors = self.load_errors(handler)
+    def __init__(self, handler, lamb, *args, **kwargs):
+        self.__errors = self.load_errors(handler, lamb)
 
     def __len__(self):
         return len(self.__errors)
@@ -13,12 +14,28 @@ class ErrorsProbs:
     def errors(self):
         return self.__errors
 
-    def load_errors(self, handler):
+    def load_errors(self, handler, lamb=None):
         if isinstance(handler, str):
-            errors = np.loadtxt(handler, delimiter=",")
-        if isinstance(handler, list):
+            if lamb is None:
+                raise ValueError("regularization coefficient lambda is None")
+            errors_df = pd.read_csv(handler)
+            q = errors_df.query("lamb == @lamb")
+            if len(q) == 0:
+                raise ValueError(f"regularization coefficient lambda={lamb} is not found in {handler}")
+            if len(q) != 1:
+                raise ValueError(f"several rows were found in handler {handler}")
+            list_str = q['result_x'].iloc[0]
+            errors = np.fromstring(list_str.strip('[]'), sep=' ')
+        elif isinstance(handler, list):
             errors = np.array(handler)
-        errors /= errors.sum()
+        else:
+            raise TypeError("handler must be either a string (file path) or a list of errors")
+        
+        sum_errors = errors.sum()
+        if sum_errors == 0:
+            raise ValueError("Sum of errors is zero, cannot normalize")
+        
+        errors = errors / sum_errors
         return errors
 
     def __getitem__(self, items):
